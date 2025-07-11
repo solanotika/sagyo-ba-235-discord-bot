@@ -3,9 +3,9 @@ name: Discord Bot Workflow
 on:
   workflow_dispatch: # 手動で実行できるようにする
   schedule:
-    # 5分ごとにワークフローを実行する
+    # 10分ごとにワークフローを実行する
     # 注意: これによりGitHub Actionsの無料枠を消費します
-    - cron: '*/5 * * * *'
+    - cron: '*/10 * * * *'
 
 jobs:
   run-bot:
