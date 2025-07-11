@@ -1,0 +1,69 @@
+name: Discord Bot Workflow
+
+on:
+  workflow_dispatch: # 手動で実行できるようにする
+  schedule:
+    # 5分ごとにワークフローを実行する
+    # 注意: これによりGitHub Actionsの無料枠を消費します
+    - cron: '*/5 * * * *'
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    # GitHub Actionsの最大実行時間(6時間)より少し短い355分でタイムアウト設定
+    timeout-minutes: 355
+
+    steps:
+      # 1. リポジトリのコードをチェックアウト
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # 後でgit pushするためにトークンを渡す
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # 2. Python環境のセットアップ
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      # 3. 依存ライブラリのインストール
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install discord.py python-dotenv
+
+      # 4. Botスクリプトの実行
+      - name: Run Discord Bot script
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          BUMP_CHANNEL_ID: ${{ secrets.BUMP_CHANNEL_ID }}
+          BUMP_LOG_CHANNEL_ID: ${{ secrets.BUMP_LOG_CHANNEL_ID }}
+          INTRO_CHANNEL_ID: ${{ secrets.INTRO_CHANNEL_ID }}
+          INTRO_ROLE_ID: ${{ secrets.INTRO_ROLE_ID }}
+          WELCOME_CHANNEL_ID: ${{ secrets.WELCOME_CHANNEL_ID }}
+        run: python bot.py
+
+      # 5. ワークフローの再起動 (24時間稼働のため)
+      # タイムアウトなどで終了した場合でも必ず実行されるようにする
+      - name: Restart workflow
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 6時間(360分)経過後に自分自身を再実行する
+          # このワークフローの実行IDを取得
+          RUN_ID=$(gh run list --workflow "bot_workflow.yml" --limit 1 --json databaseId -q '.[].databaseId')
+          # ワークフローの開始時刻を取得
+          START_TIME=$(gh run view $RUN_ID --json createdAt -q '.createdAt')
+          # 350分後の時刻を計算 (安全マージン)
+          RESTART_TIME=$(date -d "$START_TIME + 350 minutes" +%s)
+          CURRENT_TIME=$(date +%s)
+          
+          # もし350分以上経過していたら再起動
+          if [ $CURRENT_TIME -ge $RESTART_TIME ]; then
+            echo "Workflow has been running for over 350 minutes. Restarting..."
+            gh workflow run bot_workflow.yml --ref ${{ github.ref_name }}
+          else
+            echo "Not time to restart yet."
+          fi
