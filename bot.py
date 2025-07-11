@@ -2,12 +2,23 @@ import discord
 from discord.ext import tasks
 import os
 import json
-import asyncio
 from datetime import datetime, timedelta, timezone
+import logging
+
+# --- ロギング設定 ---
+# Renderのログ画面で見やすくするため
+logging.basicConfig(level=logging.INFO)
 
 # --- 環境変数からIDを取得 ---
-# (この部分は変更なし)
+# python-dotenvはローカルテスト用。Renderでは環境変数パネルを使う。
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass # Render環境では不要
+
 TOKEN = os.getenv('DISCORD_BOT_TOKEN')
+# IDは数値として扱う
 BUMP_CHANNEL_ID = int(os.getenv('BUMP_CHANNEL_ID'))
 BUMP_LOG_CHANNEL_ID = int(os.getenv('BUMP_LOG_CHANNEL_ID'))
 INTRO_CHANNEL_ID = int(os.getenv('INTRO_CHANNEL_ID'))
@@ -15,12 +26,11 @@ INTRO_ROLE_ID = int(os.getenv('INTRO_ROLE_ID'))
 WELCOME_CHANNEL_ID = int(os.getenv('WELCOME_CHANNEL_ID'))
 
 # --- 状態を保存するファイル名 ---
-# (この部分は変更なし)
-BUMP_COUNT_FILE = 'bump_counts.json'
-LAST_BUMP_TIME_FILE = 'last_bump_time.txt'
+# 注意: Renderの無料プランでは、デプロイのたびにファイルがリセットされる可能性がある
+BUMP_COUNT_FILE = 'data/bump_counts.json'
+LAST_BUMP_TIME_FILE = 'data/last_bump_time.txt'
 
 # --- Discord Botのクライアント設定 ---
-# (この部分は変更なし)
 intents = discord.Intents.default()
 intents.messages = True
 intents.guilds = True
@@ -28,149 +38,108 @@ intents.members = True
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-# --- Git操作用の関数 ---
-# (commit_and_push関数は変更なし)
-async def commit_and_push(file_paths, commit_message):
-    """変更をリポジトリにコミット&プッシュする"""
-    proc_git_config_user = await asyncio.create_subprocess_shell('git config --global user.name "GitHub Actions Bot"')
-    await proc_git_config_user.wait()
-    proc_git_config_email = await asyncio.create_subprocess_shell('git config --global user.email "action@github.com"')
-    await proc_git_config_email.wait()
-    
-    for file_path in file_paths:
-        proc_git_add = await asyncio.create_subprocess_shell(f'git add {file_path}')
-        await proc_git_add.wait()
-        
-    proc_git_diff = await asyncio.create_subprocess_shell('git diff --staged --quiet')
-    await proc_git_diff.wait()
-
-    if proc_git_diff.returncode != 0:
-        print(f"Committing changes: {commit_message}")
-        proc_git_commit = await asyncio.create_subprocess_shell(f'git commit -m "{commit_message}"')
-        await proc_git_commit.wait()
-        proc_git_push = await asyncio.create_subprocess_shell('git push')
-        await proc_git_push.wait()
-    else:
-        print("No changes to commit.")
-
-# --- Bump関連の機能 (①, ②) ---
-# (check_bump_status関数は変更なし)
-async def check_bump_status():
-    # ... (前回のコードと全く同じ)
-    print("Checking for bump status...")
-    bump_channel = client.get_channel(BUMP_CHANNEL_ID)
-    if not bump_channel: return
-
-    disboard_bot_id = 302050872383242240
-    
-    async for message in bump_channel.history(limit=50):
-        if message.author.id == disboard_bot_id and "表示順をアップしたよ" in message.content:
-            bump_time = message.created_at
-            
-            last_notified_bump_time_str = ""
-            if os.path.exists(LAST_BUMP_TIME_FILE):
-                with open(LAST_BUMP_TIME_FILE, 'r') as f:
-                    last_notified_bump_time_str = f.read().strip()
-            
-            last_notified_bump_time = datetime.fromisoformat(last_notified_bump_time_str) if last_notified_bump_time_str else None
-
-            if datetime.now(timezone.utc) >= bump_time + timedelta(hours=2):
-                if last_notified_bump_time is None or last_notified_bump_time < bump_time:
-                    print(f"Bump reminder needed. Last bump at {bump_time}.")
-                    await bump_channel.send("みんな、DISBOARDの **/bump** の時間だよ！\nサーバーの表示順を上げて、新しい仲間を増やそう！")
-                    
-                    with open(LAST_BUMP_TIME_FILE, 'w') as f:
-                        f.write(str(bump_time.isoformat()))
-                    
-                    if message.interaction and message.interaction.user:
-                        user = message.interaction.user
-                        counts = {}
-                        if os.path.exists(BUMP_COUNT_FILE):
-                            with open(BUMP_COUNT_FILE, 'r') as f:
-                                try:
-                                    counts = json.load(f)
-                                except json.JSONDecodeError:
-                                    counts = {}
-                        
-                        user_id_str = str(user.id)
-                        counts[user_id_str] = counts.get(user_id_str, 0) + 1
-                        
-                        with open(BUMP_COUNT_FILE, 'w') as f:
-                            json.dump(counts, f, indent=2)
-
-                        log_channel = client.get_channel(BUMP_LOG_CHANNEL_ID)
-                        if log_channel:
-                            guild = bump_channel.guild
-                            report_lines = ["📈 **Bump実行回数レポート** 📈"]
-                            sorted_counts = sorted(counts.items(), key=lambda item: item[1], reverse=True)
-
-                            for uid, count in sorted_counts:
-                                member = guild.get_member(int(uid))
-                                user_name = member.display_name if member else f"ID: {uid}"
-                                report_lines.append(f"・{user_name}: {count}回")
-                                
-                            await log_channel.send("\n".join(report_lines))
-
-                        await commit_and_push([BUMP_COUNT_FILE, LAST_BUMP_TIME_FILE], "Update bump status")
-            break
-    print("Bump check finished.")
-
-# --- 自己紹介関連の機能 (③, ④, ⑤) ---
-# (check_introductions関数は変更なし)
-async def check_introductions():
-    # ... (前回のコードと全く同じ)
-    print("Checking for new introductions...")
-    intro_channel = client.get_channel(INTRO_CHANNEL_ID)
-    if not intro_channel: return
-    
-    welcome_channel = client.get_channel(WELCOME_CHANNEL_ID)
-    guild = intro_channel.guild
-    intro_role = guild.get_role(INTRO_ROLE_ID)
-
-    if not (welcome_channel and guild and intro_role): return
-
-    since = datetime.now(timezone.utc) - timedelta(days=1)
-    
-    async for message in intro_channel.history(limit=200, after=since):
-        author = message.author
-        if isinstance(author, discord.Member) and not author.bot and intro_role not in author.roles:
-            print(f"Found new introduction from {author.display_name}. Assigning role...")
-            try:
-                await author.add_roles(intro_role, reason="自己紹介を投稿したため")
-                await welcome_channel.send(f"🎉{author.mention}さん、ようこそ「作業場235」へ！VCが開放されたよ、自由に使ってね！")
-            except discord.Forbidden:
-                print(f"Error: Missing permissions to assign role to {author.display_name}")
-            except Exception as e:
-                print(f"An error occurred while processing {author.display_name}: {e}")
-            
-    print("Introduction check finished.")
-
-# --- ここからが変更点 ---
-
-# 15分ごとに実行する定期処理タスクを定義
-@tasks.loop(minutes=15)
-async def periodic_checks():
-    """定期的に実行したい処理をここにまとめる"""
-    print(f"\n--- Running periodic checks at {datetime.now()} ---")
+# --- Bumpリマインダー機能 ---
+@tasks.loop(minutes=10) # 10分ごとにチェック
+async def check_bump_reminder():
+    """2時間経過したことを通知するリマインダー機能"""
     try:
-        await check_bump_status()
-        await check_introductions()
+        # ファイルから最後のBump時刻を読み込む
+        last_bump_time_str = ""
+        if os.path.exists(LAST_BUMP_TIME_FILE):
+            with open(LAST_BUMP_TIME_FILE, 'r') as f:
+                last_bump_time_str = f.read().strip()
+        
+        if not last_bump_time_str:
+            return # Bump記録がまだない
+
+        last_bump_time = datetime.fromisoformat(last_bump_time_str)
+        
+        # 2時間経過していて、まだリマインドを送っていなければ通知
+        if datetime.now(timezone.utc) >= last_bump_time + timedelta(hours=2):
+            bump_channel = client.get_channel(BUMP_CHANNEL_ID)
+            # リマインド済みかを簡易的にチェック（ここでは毎回送るのを避けるため、最後のbump時刻を更新しない）
+            # より正確にするには、最後にリマインドした時刻も別途保存する必要がある
+            # ここではシンプルに、2時間経過後の最初のチェックで通知する想定
+            await bump_channel.send("みんな、DISBOARDの **/bump** の時間だよ！\nサーバーの表示順を上げて、新しい仲間を増やそう！")
+            # 2時間以上経ったらリマインドし続けないように、一度ファイルをリセット
+            os.remove(LAST_BUMP_TIME_FILE) 
+            logging.info("Sent a bump reminder.")
+
     except Exception as e:
-        print(f"An error occurred during periodic checks: {e}")
-    print("--- Periodic checks finished. Waiting for next loop. ---")
+        logging.error(f"Error in check_bump_reminder: {e}")
 
-@periodic_checks.before_loop
-async def before_periodic_checks():
-    """ループが始まる前に、Botが完全に準備できるまで待つ"""
-    await client.wait_until_ready()
-
+# --- Bot起動時の処理 ---
 @client.event
 async def on_ready():
-    """Botが起動したときに一度だけ実行される処理"""
-    print(f'Logged in as {client.user}')
-    # 定期処理タスクを開始する
-    periodic_checks.start()
+    logging.info(f'Logged in as {client.user}')
+    # dataディレクトリがなければ作成
+    if not os.path.exists('data'):
+        os.makedirs('data')
+    # 定期リマインダータスクを開始
+    check_bump_reminder.start()
+
+# --- メッセージ受信時の処理（イベント駆動の心臓部） ---
+@client.event
+async def on_message(message):
+    # 自分自身やBotのメッセージは無視
+    if message.author == client.user or message.author.bot:
+        return
+
+    # --- ③,④ 自己紹介チャンネルへの投稿を即時検知 ---
+    if message.channel.id == INTRO_CHANNEL_ID:
+        author_member = message.guild.get_member(message.author.id)
+        intro_role = message.guild.get_role(INTRO_ROLE_ID)
+
+        if intro_role not in author_member.roles:
+            try:
+                await author_member.add_roles(intro_role, reason="自己紹介の投稿")
+                welcome_channel = client.get_channel(WELCOME_CHANNEL_ID)
+                await welcome_channel.send(f"🎉{author_member.mention}さん、ようこそ「作業場235」へ！VCが開放されたよ、自由に使ってね！")
+                logging.info(f"Assigned intro role to {author_member.display_name}.")
+            except Exception as e:
+                logging.error(f"Failed to assign role or send welcome message: {e}")
+
+    # --- ①,② Bump成功メッセージを即時検知 ---
+    if message.channel.id == BUMP_CHANNEL_ID and message.author.id == 302050872383242240:
+        if "表示順をアップしたよ" in message.content and message.interaction:
+            user = message.interaction.user
+            logging.info(f"Bump detected by {user.display_name}.")
+            
+            # Bump時刻をファイルに記録 (リマインダー用)
+            with open(LAST_BUMP_TIME_FILE, 'w') as f:
+                f.write(str(message.created_at.isoformat()))
+            
+            # Bump回数を記録
+            counts = {}
+            if os.path.exists(BUMP_COUNT_FILE):
+                with open(BUMP_COUNT_FILE, 'r') as f:
+                    try:
+                        counts = json.load(f)
+                    except json.JSONDecodeError:
+                        pass # ファイルが空なら何もしない
+            
+            user_id_str = str(user.id)
+            counts[user_id_str] = counts.get(user_id_str, 0) + 1
+            
+            with open(BUMP_COUNT_FILE, 'w') as f:
+                json.dump(counts, f, indent=2)
+
+            # 監査ログに出力
+            log_channel = client.get_channel(BUMP_LOG_CHANNEL_ID)
+            guild = message.guild
+            report_lines = ["📈 **Bump実行回数レポート** 📈"]
+            sorted_counts = sorted(counts.items(), key=lambda item: item[1], reverse=True)
+
+            for uid, count in sorted_counts:
+                member = guild.get_member(int(uid))
+                user_name = member.display_name if member else f"ID: {uid}"
+                report_lines.append(f"・{user_name}: {count}回")
+            
+            await log_channel.send("\n".join(report_lines))
 
 # --- メイン処理 ---
 if __name__ == "__main__":
-    client.run(TOKEN)
+    if TOKEN:
+        client.run(TOKEN)
+    else:
+        logging.error("DISCORD_BOT_TOKEN not found. Make sure it is set.")
