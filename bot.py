@@ -61,23 +61,33 @@ async def periodic_role_check():
     logging.info("--- Periodic role check finished ---")
 
 
-# --- Bumpリマインダー機能 ---
-@tasks.loop(minutes=15)
+# --- Bumpリマインダー機能 ---@tasks.loop(minutes=15)
 async def check_bump_reminder():
-    logging.info("--- Running bump reminder check (DISBOARD author specific) ---")
+    """DISBOARD Botの最後の発言から2時間経過していたら通知する"""
     try:
+        logging.info("--- Running bump reminder check (DISBOARD author specific) ---")
         bump_channel = client.get_channel(BUMP_CHANNEL_ID)
-        if not bump_channel: return
+        if not bump_channel:
+            logging.warning("-> Exit: Bump channel not found.")
+            return
+        logging.info("-> Step 1: Bump channel found.")
 
+        # チャンネルの最後のメッセージをより安全な方法で取得
         last_message_in_channel = None
         async for message in bump_channel.history(limit=1):
             last_message_in_channel = message
-        
-        if not last_message_in_channel: return
+
+        if not last_message_in_channel:
+            logging.info("-> Exit: No messages found in bump channel at all.")
+            return
+        logging.info(f"-> Step 2: Last message in channel is from '{last_message_in_channel.author.name}'.")
             
         if last_message_in_channel.author == client.user:
+            logging.info("-> Exit: Last message was our own reminder.")
             return
+        logging.info("-> Step 3: Last message is not from our bot.")
 
+        # チャンネルの履歴を遡って、DISBOARD Botの最後の発言を探す
         last_disboard_message = None
         disboard_bot_id = 302050872383242240
         async for message in bump_channel.history(limit=100):
@@ -85,17 +95,30 @@ async def check_bump_reminder():
                 last_disboard_message = message
                 break
 
-        if not last_disboard_message: return
+        if not last_disboard_message:
+            logging.info("-> Exit: No DISBOARD message found in recent history.")
+            return
+        logging.info(f"-> Step 4: Found last DISBOARD message at {last_disboard_message.created_at.strftime('%Y-%m-%d %H:%M:%S UTC')}")
 
+        # DISBOARD Botの最後の発言から2時間経過したかチェック
         two_hours_after_disboard_message = last_disboard_message.created_at + timedelta(hours=2)
-        if datetime.now(timezone.utc) >= two_hours_after_disboard_message:
+        current_time_utc = datetime.now(timezone.utc)
+        
+        logging.info(f"-> Step 5: Checking time. Current: {current_time_utc.strftime('%Y-%m-%d %H:%M:%S UTC')}, Target: {two_hours_after_disboard_message.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+
+        if current_time_utc >= two_hours_after_disboard_message:
+            logging.info("-> Condition MET: 2 hours have passed. Sending reminder.")
             await bump_channel.send("みんな、DISBOARDの **/bump** の時間だよ！\nサーバーの表示順を上げて、新しい仲間を増やそう！")
+        else:
+            logging.info("-> Condition NOT MET: Not yet 2 hours.")
 
     except discord.errors.Forbidden:
-        logging.error("Missing permissions to read message history in bump channel.")
+        logging.error("-> FATAL: Missing permissions to read message history in bump channel.")
     except Exception as e:
-        logging.error(f"Error in check_bump_reminder: {e}")
-    logging.info("--- Bump reminder check finished ---")
+        logging.error(f"-> FATAL: An unexpected error occurred: {e}")
+    finally:
+        logging.info("--- Bump reminder check finished ---")
+
 
 # --- Bot起動時の処理 ---
 @client.event
