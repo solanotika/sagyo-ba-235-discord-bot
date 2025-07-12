@@ -82,11 +82,12 @@ class MyClient(discord.Client):
     async def close(self):
         if self.db_pool:
             await self.db_pool.close()
+            logging.info("Database connection pool closed.")
         await super().close()
 
 client = MyClient(intents=intents)
 
-# --- バックグラウンド処理 ---
+# --- バックグラウンド処理のヘルパー関数 ---
 async def do_periodic_role_check():
     try:
         intro_channel = client.get_channel(INTRO_CHANNEL_ID)
@@ -140,6 +141,7 @@ async def do_bump_reminder_check():
     except Exception as e:
         logging.error(f"Error in check_bump_reminder: {e}", exc_info=True)
 
+# --- 統合された単一バックグラウンドループ ---
 @tasks.loop(minutes=15)
 async def unified_background_loop():
     if not client.is_ready() or not client.db_pool:
@@ -157,7 +159,7 @@ async def unified_background_loop():
 # --- Bot起動時の処理 ---
 @client.event
 async def on_ready():
-    logging.info(f'Logged in as {client.user}')
+    logging.info(f'Logged in as {client.user.name} ({client.user.id})')
     if not os.path.exists('data'):
         os.makedirs('data')
     
@@ -222,8 +224,7 @@ async def on_message(message):
 
 @client.event
 async def on_voice_state_update(member, before, after):
-    if member.bot or not client.db_pool:
-        return
+    if member.bot or not client.db_pool: return
     now = datetime.now(timezone.utc)
     if after.channel and after.channel.id in TARGET_VC_IDS and (not before.channel or before.channel.id not in TARGET_VC_IDS):
         active_sessions[member.id] = now
@@ -233,34 +234,30 @@ async def on_voice_state_update(member, before, after):
             join_time = active_sessions.pop(member.id)
             duration = (now - join_time).total_seconds()
             
-            total_seconds = 0 # 累計時間を初期化
+            total_seconds = 0
             async with client.db_pool.acquire() as connection:
-                # まず、今回の滞在時間をデータベースに記録・加算する
                 await connection.execute('''
                     INSERT INTO work_logs (user_id, total_seconds) VALUES ($1, $2)
                     ON CONFLICT (user_id) DO UPDATE
                     SET total_seconds = work_logs.total_seconds + $2
                 ''', member.id, duration)
                 
-                # 次に、更新された後の累計時間をデータベースから取得する
                 record = await connection.fetchrow('SELECT total_seconds FROM work_logs WHERE user_id = $1', member.id)
                 if record:
                     total_seconds = record['total_seconds']
 
-            # 今回の時間と、累計時間の両方をフォーマットする
             formatted_duration = format_duration(duration)
             formatted_total_duration = format_duration(total_seconds)
             logging.info(f"{member.display_name} left target VC {before.channel.name}. Session duration: {formatted_duration}")
             
             log_channel = client.get_channel(WORK_LOG_CHANNEL_ID)
             if log_channel:
-                # 通知メッセージに「累計作業時間」の行を追加する
                 await log_channel.send(f"お疲れ様、{member.mention}！\n今回の作業時間: **{formatted_duration}**\n累計作業時間: **{formatted_total_duration}**")
 
 @client.tree.command(name="worktime", description="指定したメンバーの累計作業時間を表示します。")
 async def worktime(interaction: discord.Interaction, member: discord.Member):
     if not client.db_pool:
-        await interaction.response.send_message("データベースに接続できていません。管理者に連絡してください。", ephemeral=True)
+        await interaction.response.send_message("データベースに接続できていません。", ephemeral=True)
         return
     await interaction.response.defer()
     total_seconds = 0
@@ -279,9 +276,7 @@ async def worktime(interaction: discord.Interaction, member: discord.Member):
 @app_commands.describe(channel="投稿先のチャンネル")
 @app_commands.checks.has_permissions(administrator=True)
 async def announce(interaction: discord.Interaction, channel: discord.TextChannel):
-    announcement_text = """
-お知らせ用メッセージ入力欄
-"""
+    announcement_text = "★お知らせ用メッセージ入力欄"
     try:
         await channel.send(announcement_text)
         await interaction.response.send_message(f"{channel.mention} にお知らせを投稿したよ。", ephemeral=True)
@@ -299,20 +294,13 @@ async def announce_error(interaction: discord.Interaction, error: app_commands.A
 
 # --- メイン処理 ---
 if __name__ == "__main__":
-    RECONNECT_DELAY = 300
-    while True:
-        try:
-            if TOKEN and DATABASE_URL:
-                client.run(TOKEN)
-            else:
-                logging.error("Required environment variables not found. Exiting.")
-                break 
-        except discord.errors.HTTPException as e:
-            if e.status == 429:
-                logging.warning(f"Rate-limited. Waiting {RECONNECT_DELAY}s.")
-                time.sleep(RECONNECT_DELAY)
-            else:
-                raise
-        except Exception as e:
-            logging.error(f"Main loop error: {e}", exc_info=True)
-            time.sleep(60)
+    try:
+        if TOKEN and DATABASE_URL:
+            client.run(TOKEN)
+        else:
+            logging.error("Required environment variables not found. Exiting.")
+    except discord.errors.HTTPException as e:
+        if e.status == 429:
+            logging.warning("Rate-limited on login. Sleeping for 5 minutes before exiting to allow cooldown.")
+            time.sleep(300)
+        raise
