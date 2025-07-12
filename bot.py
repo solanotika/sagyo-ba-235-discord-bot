@@ -267,6 +267,29 @@ async def worktime(interaction: discord.Interaction, member: discord.Member):
     formatted_time = format_duration(total_seconds)
     await interaction.followup.send(f"{member.mention} さんの累計作業時間は **{formatted_time}** です。")
 
+@client.tree.command(name="announce", description="指定したチャンネルにBotからお知らせを投稿します。(管理者限定)")
+@app_commands.describe(channel="投稿先のチャンネル")
+@app_commands.checks.has_permissions(administrator=True)
+async def announce(interaction: discord.Interaction, channel: discord.TextChannel):
+    announcement_text = """
+★お知らせ用メッセージ★
+"""
+    try:
+        await channel.send(announcement_text)
+        await interaction.response.send_message(f"{channel.mention} にお知らせを投稿したよ。", ephemeral=True)
+    except discord.Forbidden:
+        await interaction.response.send_message(f"エラー: {channel.mention} にメッセージを投稿する権限がないみたい。", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"エラーが発生しました: {e}", ephemeral=True)
+
+# エラーハンドリング
+@announce.error
+async def announce_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.errors.MissingPermissions):
+        await interaction.response.send_message("このコマンドは管理者しか使えないよ。", ephemeral=True)
+    else:
+        await interaction.response.send_message(f"コマンドの実行中にエラーが発生しました: {error}", ephemeral=True)
+
 
 # --- メイン処理 ---
 if __name__ == "__main__":
