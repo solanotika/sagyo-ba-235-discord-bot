@@ -27,7 +27,7 @@ BUMP_LOG_CHANNEL_ID = int(os.getenv('BUMP_LOG_CHANNEL_ID'))
 INTRO_CHANNEL_ID = int(os.getenv('INTRO_CHANNEL_ID'))
 INTRO_ROLE_ID = int(os.getenv('INTRO_ROLE_ID'))
 WELCOME_CHANNEL_ID = int(os.getenv('WELCOME_CHANNEL_ID'))
-
+WORK_LOG_CHANNEL_ID = int(os.getenv('WORK_LOG_CHANNEL_ID')) # 新しいチャンネルID
 
 # --- 状態を保存するファイル名 ---
 BUMP_COUNT_FILE = 'data/bump_counts.json'
@@ -215,40 +215,55 @@ async def on_message(message):
 # --- VC監視機能 ---
 @client.event
 async def on_voice_state_update(member, before, after):
-    if member.bot: return
+    if member.bot:
+        return
+
     now = datetime.now(timezone.utc)
+    
     if after.channel and after.channel.id in TARGET_VC_IDS and (not before.channel or before.channel.id not in TARGET_VC_IDS):
         active_sessions[member.id] = now
         logging.info(f"{member.display_name} joined target VC {after.channel.name}. Session started.")
+
     elif before.channel and before.channel.id in TARGET_VC_IDS and (not after.channel or after.channel.id not in TARGET_VC_IDS):
         if member.id in active_sessions:
             join_time = active_sessions.pop(member.id)
             duration = (now - join_time).total_seconds()
+            
             times = load_work_times()
             user_id_str = str(member.id)
             times[user_id_str] = times.get(user_id_str, 0) + duration
             save_work_times(times)
+            
             formatted_duration = format_duration(duration)
             logging.info(f"{member.display_name} left target VC {before.channel.name}. Session duration: {formatted_duration}")
-            try:
-                await member.send(f"お疲れ様！今回の作業時間は **{formatted_duration}** だったよ。")
-                logging.info(f"Sent work time notification to {member.display_name}.")
-            except discord.Forbidden:
-                logging.warning(f"Could not send DM to {member.display_name}. They might have DMs disabled.")
-            except Exception as e:
-                logging.error(f"Failed to send DM to {member.display_name}: {e}")
+            
+            # --- ここからが変更点 ---
+            log_channel = client.get_channel(WORK_LOG_CHANNEL_ID)
+            if log_channel:
+                try:
+                    # ログチャンネルにメンション付きで投稿
+                    await log_channel.send(f"お疲れ様、{member.mention}！今回の作業時間は **{formatted_duration}** だったよ。")
+                    logging.info(f"Sent work time notification to log channel for {member.display_name}.")
+                except Exception as e:
+                    logging.error(f"Failed to send message to work log channel: {e}")
+            else:
+                logging.warning("Work log channel not found.")
+            # --- ここまでが変更点 ---
 
 # --- 新しいスラッシュコマンド ---
 @client.tree.command(name="worktime", description="指定したメンバーの累計作業時間を表示します。")
 async def worktime(interaction: discord.Interaction, member: discord.Member):
     await interaction.response.defer() 
+    
     times = load_work_times()
     user_id_str = str(member.id)
     total_seconds = times.get(user_id_str, 0)
+    
     if member.id in active_sessions:
         join_time = active_sessions[member.id]
         current_session_duration = (datetime.now(timezone.utc) - join_time).total_seconds()
         total_seconds += current_session_duration
+
     formatted_time = format_duration(total_seconds)
     await interaction.followup.send(f"{member.mention} さんの累計作業時間は **{formatted_time}** です。")
 
