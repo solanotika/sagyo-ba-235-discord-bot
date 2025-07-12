@@ -232,17 +232,30 @@ async def on_voice_state_update(member, before, after):
         if member.id in active_sessions:
             join_time = active_sessions.pop(member.id)
             duration = (now - join_time).total_seconds()
+            
+            total_seconds = 0 # 累計時間を初期化
             async with client.db_pool.acquire() as connection:
+                # まず、今回の滞在時間をデータベースに記録・加算する
                 await connection.execute('''
                     INSERT INTO work_logs (user_id, total_seconds) VALUES ($1, $2)
                     ON CONFLICT (user_id) DO UPDATE
                     SET total_seconds = work_logs.total_seconds + $2
                 ''', member.id, duration)
+                
+                # 次に、更新された後の累計時間をデータベースから取得する
+                record = await connection.fetchrow('SELECT total_seconds FROM work_logs WHERE user_id = $1', member.id)
+                if record:
+                    total_seconds = record['total_seconds']
+
+            # 今回の時間と、累計時間の両方をフォーマットする
             formatted_duration = format_duration(duration)
+            formatted_total_duration = format_duration(total_seconds)
             logging.info(f"{member.display_name} left target VC {before.channel.name}. Session duration: {formatted_duration}")
+            
             log_channel = client.get_channel(WORK_LOG_CHANNEL_ID)
             if log_channel:
-                await log_channel.send(f"お疲れ様、{member.mention}！今回の作業時間は **{formatted_duration}** だったよ。")
+                # 通知メッセージに「累計作業時間」の行を追加する
+                await log_channel.send(f"お疲れ様、{member.mention}！\n今回の作業時間: **{formatted_duration}**\n累計作業時間: **{formatted_total_duration}**")
 
 @client.tree.command(name="worktime", description="指定したメンバーの累計作業時間を表示します。")
 async def worktime(interaction: discord.Interaction, member: discord.Member):
