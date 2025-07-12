@@ -134,7 +134,18 @@ async def unified_background_loop(client: MyClient):
         await do_periodic_role_check(client)
 
 # --- Botのセットアップと実行ロジック ---
-def setup_bot_events_and_commands(client: MyClient):
+def setup_bot_events_and_commands():
+    # --- ここが修正点 ---
+    intents = discord.Intents.default()
+    intents.voice_states = True
+    intents.guilds = True
+    intents.members = True
+    intents.messages = True
+    intents.message_content = True
+    
+    client = MyClient(intents=intents)
+    # --- ここまでが修正点 ---
+
     @client.event
     async def on_ready():
         logging.info(f'Logged in as {client.user.name} ({client.user.id})')
@@ -268,7 +279,7 @@ def setup_bot_events_and_commands(client: MyClient):
 # --- メイン実行ブロック ---
 if __name__ == "__main__":
     while True:
-        client = setup_bot_events_and_commands(MyClient(intents=intents))
+        client = setup_bot_events_and_commands()
         try:
             if TOKEN and DATABASE_URL:
                 client.run(TOKEN)
