@@ -5,7 +5,7 @@ import json
 from datetime import datetime, timedelta, timezone
 import logging
 import re
-import asyncio # <--- これが追加された重要な一行！
+import asyncio
 
 # --- ロギング設定 ---
 logging.basicConfig(level=logging.INFO)
@@ -35,17 +35,21 @@ intents.members = True
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-
 # --- 定期パトロール機能 ---
 @tasks.loop(hours=2)
 async def periodic_role_check():
     logging.info("--- Running periodic role check ---")
     try:
         intro_channel = client.get_channel(INTRO_CHANNEL_ID)
-        if not intro_channel: return
+        if not intro_channel:
+            logging.warning("Intro channel not found for periodic check.")
+            return
+
         guild = intro_channel.guild
         intro_role = guild.get_role(INTRO_ROLE_ID)
-        if not intro_role: return
+        if not intro_role:
+            logging.warning("Intro role not found for periodic check.")
+            return
 
         since = datetime.now(timezone.utc) - timedelta(days=1)
         async for message in intro_channel.history(limit=200, after=since):
@@ -54,7 +58,9 @@ async def periodic_role_check():
             
             author_member = guild.get_member(message.author.id)
             if author_member:
+                logging.info(f"Found user without role in history: {author_member.display_name}. Assigning role...")
                 await author_member.add_roles(intro_role, reason="自己紹介の履歴をチェックして付与")
+                
                 welcome_channel = client.get_channel(WELCOME_CHANNEL_ID)
                 if welcome_channel:
                     await welcome_channel.send(f"🎉{author_member.mention}さん、ようこそ「作業場235」へ！VCが開放されたよ、自由に使ってね！ (履歴チェックより)")
@@ -62,20 +68,22 @@ async def periodic_role_check():
         logging.error(f"Error in periodic_role_check: {e}")
     logging.info("--- Periodic role check finished ---")
 
-
 # --- Bumpリマインダー機能 ---
 @tasks.loop(minutes=15)
 async def check_bump_reminder():
     logging.info("--- Running bump reminder check (DISBOARD author specific) ---")
     try:
         bump_channel = client.get_channel(BUMP_CHANNEL_ID)
-        if not bump_channel: return
+        if not bump_channel:
+            logging.warning("Bump channel not found for reminder check.")
+            return
 
         last_message_in_channel = None
         async for message in bump_channel.history(limit=1):
             last_message_in_channel = message
         
-        if not last_message_in_channel: return
+        if not last_message_in_channel:
+            return
             
         if last_message_in_channel.author == client.user:
             return
@@ -87,7 +95,8 @@ async def check_bump_reminder():
                 last_disboard_message = message
                 break
 
-        if not last_disboard_message: return
+        if not last_disboard_message:
+            return
 
         two_hours_after_disboard_message = last_disboard_message.created_at + timedelta(hours=2)
         if datetime.now(timezone.utc) >= two_hours_after_disboard_message:
@@ -103,23 +112,31 @@ async def check_bump_reminder():
 @client.event
 async def on_ready():
     logging.info(f'Logged in as {client.user}')
-    
-    # 起動直後にタスクが集中しないように、60秒待機する
-    await asyncio.sleep(60) 
 
     if not os.path.exists('data'):
         os.makedirs('data')
-    
-    if not check_bump_reminder.is_running():
-        check_bump_reminder.start()
+
     if not periodic_role_check.is_running():
+        logging.info("Waiting 30 seconds before starting periodic_role_check...")
+        await asyncio.sleep(30)
         periodic_role_check.start()
+        logging.info("-> periodic_role_check task started.")
+
+    if not check_bump_reminder.is_running():
+        logging.info("Waiting another 30 seconds before starting check_bump_reminder...")
+        await asyncio.sleep(30)
+        check_bump_reminder.start()
+        logging.info("-> check_bump_reminder task started.")
+    
+    logging.info("All background tasks initiated.")
 
 # --- メッセージ受信時の処理 ---
 @client.event
 async def on_message(message):
-    if message.author == client.user: return
-    if message.author.bot and message.author.id != 302050872383242240: return
+    if message.author == client.user:
+        return
+    if message.author.bot and message.author.id != 302050872383242240:
+        return
 
     # 自己紹介チャンネルの処理
     if message.channel.id == INTRO_CHANNEL_ID and not message.author.bot:
@@ -140,7 +157,7 @@ async def on_message(message):
                     referenced_message = await message.channel.fetch_message(message.reference.message_id)
                     user = referenced_message.author
                 except (discord.NotFound, discord.HTTPException):
-                    pass # 返信元が取得できなくても、他の方法で試す
+                    pass
             
             if not user and message.interaction:
                 user = message.interaction.user
@@ -161,8 +178,10 @@ async def on_message(message):
                 counts = {}
                 if os.path.exists(BUMP_COUNT_FILE):
                     with open(BUMP_COUNT_FILE, 'r') as f:
-                        try: counts = json.load(f)
-                        except json.JSONDecodeError: pass
+                        try:
+                            counts = json.load(f)
+                        except json.JSONDecodeError:
+                            pass
                 user_id_str = str(user.id)
                 counts[user_id_str] = counts.get(user_id_str, 0) + 1
                 with open(BUMP_COUNT_FILE, 'w') as f:
