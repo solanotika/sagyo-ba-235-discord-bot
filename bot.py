@@ -55,7 +55,7 @@ async def periodic_role_check():
                 await author_member.add_roles(intro_role, reason="自己紹介の履歴をチェックして付与")
                 welcome_channel = client.get_channel(WELCOME_CHANNEL_ID)
                 if welcome_channel:
-                    await welcome_channel.send(f"🎉{author_member.mention}さん、ようこそ「作業場235」へ！VCが開放されたよ、自由に使ってね！ (履歴チェックより)")
+                    await welcome_channel.send(f"🎉{author_member.mention}さん、ようこそ「作業場235」へ！VCが開放されたよ、自由に使ってね！")
     except Exception as e:
         logging.error(f"Error in periodic_role_check: {e}")
     logging.info("--- Periodic role check finished ---")
