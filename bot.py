@@ -1,4 +1,5 @@
 import discord
+from discord import app_commands
 from discord.ext import tasks
 import os
 import json
@@ -18,15 +19,44 @@ except ImportError:
     pass
 
 TOKEN = os.getenv('DISCORD_BOT_TOKEN')
+TARGET_VC_IDS_STR = os.getenv('TARGET_VC_IDS', '')
+TARGET_VC_IDS = {int(id_str.strip()) for id_str in TARGET_VC_IDS_STR.split(',') if id_str.strip().isdigit()}
 BUMP_CHANNEL_ID = int(os.getenv('BUMP_CHANNEL_ID'))
 BUMP_LOG_CHANNEL_ID = int(os.getenv('BUMP_LOG_CHANNEL_ID'))
 INTRO_CHANNEL_ID = int(os.getenv('INTRO_CHANNEL_ID'))
 INTRO_ROLE_ID = int(os.getenv('INTRO_ROLE_ID'))
 WELCOME_CHANNEL_ID = int(os.getenv('WELCOME_CHANNEL_ID'))
 
+
 # --- 状態を保存するファイル名 ---
 BUMP_COUNT_FILE = 'data/bump_counts.json'
-LAST_REMINDED_BUMP_ID_FILE = 'data/last_reminded_id.txt' # 新しい記録ファイル
+LAST_REMINDED_BUMP_ID_FILE = 'data/last_reminded_id.txt'
+WORK_TIMES_FILE = 'data/work_times.json'
+
+# --- グローバル変数 ---
+active_sessions = {}
+
+# --- 時間をフォーマットするヘルパー関数 ---
+def format_duration(total_seconds):
+    if total_seconds < 0:
+        total_seconds = 0
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{int(hours)}時間 {int(minutes)}分 {int(seconds)}秒"
+
+# --- 時間記録データをロード/セーブする関数 ---
+def load_work_times():
+    if not os.path.exists(WORK_TIMES_FILE):
+        return {}
+    with open(WORK_TIMES_FILE, 'r') as f:
+        try:
+            return json.load(f)
+        except json.JSONDecodeError:
+            return {}
+
+def save_work_times(data):
+    with open(WORK_TIMES_FILE, 'w') as f:
+        json.dump(data, f, indent=2)
 
 # --- Discord Botのクライアント設定 ---
 intents = discord.Intents.default()
@@ -34,12 +64,21 @@ intents.messages = True
 intents.guilds = True
 intents.members = True
 intents.message_content = True
-client = discord.Client(intents=intents)
+intents.voice_states = True
+
+class MyClient(discord.Client):
+    def __init__(self, *, intents: discord.Intents):
+        super().__init__(intents=intents)
+        self.tree = app_commands.CommandTree(self)
+
+    async def setup_hook(self):
+        await self.tree.sync()
+
+client = MyClient(intents=intents)
 
 # --- 定期パトロール機能 ---
 @tasks.loop(hours=2)
 async def periodic_role_check():
-    # (この関数は変更なし)
     logging.info("--- Running periodic role check ---")
     try:
         intro_channel = client.get_channel(INTRO_CHANNEL_ID)
@@ -63,16 +102,15 @@ async def periodic_role_check():
         logging.error(f"Error in periodic_role_check: {e}")
     logging.info("--- Periodic role check finished ---")
 
-# --- Bumpリマインダー機能（修正版） ---
+
+# --- Bumpリマインダー機能 ---
 @tasks.loop(minutes=15)
 async def check_bump_reminder():
-    """DISBOARD Botの最後の発言から2時間経過していたら通知する"""
     logging.info("--- Running bump reminder check (Stateful) ---")
     try:
         bump_channel = client.get_channel(BUMP_CHANNEL_ID)
         if not bump_channel: return
 
-        # DISBOARD Botの最後の発言を探す
         last_disboard_message = None
         disboard_bot_id = 302050872383242240
         async for message in bump_channel.history(limit=100):
@@ -80,11 +118,8 @@ async def check_bump_reminder():
                 last_disboard_message = message
                 break
 
-        if not last_disboard_message:
-            logging.info("-> Exit: No DISBOARD message found in recent history.")
-            return
+        if not last_disboard_message: return
 
-        # どのBumpに対してリマインド済みか、記録ファイルから読み込む
         last_reminded_id = 0
         if os.path.exists(LAST_REMINDED_BUMP_ID_FILE):
             with open(LAST_REMINDED_BUMP_ID_FILE, 'r') as f:
@@ -92,21 +127,13 @@ async def check_bump_reminder():
                 if content.isdigit():
                     last_reminded_id = int(content)
 
-        # もし、最新のBumpに対して既にリマインド済みなら、何もしない
-        if last_disboard_message.id == last_reminded_id:
-            logging.info("-> Exit: Already sent a reminder for this specific bump.")
-            return
+        if last_disboard_message.id == last_reminded_id: return
 
-        # 2時間経過したかチェック
         two_hours_after_disboard_message = last_disboard_message.created_at + timedelta(hours=2)
         if datetime.now(timezone.utc) >= two_hours_after_disboard_message:
-            logging.info("-> Condition MET: 2 hours have passed. Sending reminder.")
             await bump_channel.send("みんな、DISBOARDの **/bump** の時間だよ！\nサーバーの表示順を上げて、新しい仲間を増やそう！")
-            
-            # リマインドを送ったら、どのBumpに対して送ったかIDを記録する
             with open(LAST_REMINDED_BUMP_ID_FILE, 'w') as f:
                 f.write(str(last_disboard_message.id))
-
     except Exception as e:
         logging.error(f"Error in check_bump_reminder: {e}", exc_info=True)
     logging.info("--- Bump reminder check finished ---")
@@ -114,7 +141,6 @@ async def check_bump_reminder():
 # --- Bot起動時の処理 ---
 @client.event
 async def on_ready():
-    # (この関数は変更なし)
     logging.info(f'Logged in as {client.user}')
     if not os.path.exists('data'):
         os.makedirs('data')
@@ -133,7 +159,6 @@ async def on_ready():
 # --- メッセージ受信時の処理 ---
 @client.event
 async def on_message(message):
-    # (この関数は変更なし)
     if message.author == client.user: return
     if message.author.bot and message.author.id != 302050872383242240: return
     if message.channel.id == INTRO_CHANNEL_ID and not message.author.bot:
@@ -185,6 +210,58 @@ async def on_message(message):
                         user_name = member.display_name if member else f"ID: {uid}"
                         report_lines.append(f"・{user_name}: {count}回")
                     await log_channel.send("\n".join(report_lines))
+
+# --- VC監視機能 ---
+@client.event
+async def on_voice_state_update(member, before, after):
+    if member.bot:
+        return
+
+    now = datetime.now(timezone.utc)
+    
+    if after.channel and after.channel.id in TARGET_VC_IDS and (not before.channel or before.channel.id not in TARGET_VC_IDS):
+        active_sessions[member.id] = now
+        logging.info(f"{member.display_name} joined target VC {after.channel.name}. Session started.")
+
+    elif before.channel and before.channel.id in TARGET_VC_IDS and (not after.channel or after.channel.id not in TARGET_VC_IDS):
+        if member.id in active_sessions:
+            join_time = active_sessions.pop(member.id)
+            duration = (now - join_time).total_seconds()
+            
+            times = load_work_times()
+            user_id_str = str(member.id)
+            times[user_id_str] = times.get(user_id_str, 0) + duration
+            save_work_times(times)
+            
+            formatted_duration = format_duration(duration)
+            logging.info(f"{member.display_name} left target VC {before.channel.name}. Session duration: {formatted_duration}")
+            
+            # --- ここからが追加した処理 ---
+            try:
+                await member.send(f"お疲れ様！今回の作業時間は **{formatted_duration}** だったよ。")
+                logging.info(f"Sent work time notification to {member.display_name}.")
+            except discord.Forbidden:
+                logging.warning(f"Could not send DM to {member.display_name}. They might have DMs disabled.")
+            except Exception as e:
+                logging.error(f"Failed to send DM to {member.display_name}: {e}")
+            # --- ここまでが追加した処理 ---
+
+# --- 新しいスラッシュコマンド ---
+@client.tree.command(name="worktime", description="指定したメンバーの累計作業時間を表示します。")
+async def worktime(interaction: discord.Interaction, member: discord.Member):
+    await interaction.response.defer() 
+    
+    times = load_work_times()
+    user_id_str = str(member.id)
+    total_seconds = times.get(user_id_str, 0)
+    
+    if member.id in active_sessions:
+        join_time = active_sessions[member.id]
+        current_session_duration = (datetime.now(timezone.utc) - join_time).total_seconds()
+        total_seconds += current_session_duration
+
+    formatted_time = format_duration(total_seconds)
+    await interaction.followup.send(f"{member.mention} さんの累計作業時間は **{formatted_time}** です。")
 
 # --- メイン処理 ---
 if __name__ == "__main__":
