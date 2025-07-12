@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import logging
 import re
 import asyncio
+import time
 
 # --- ロギング設定 ---
 logging.basicConfig(level=logging.INFO)
@@ -214,29 +215,21 @@ async def on_message(message):
 # --- VC監視機能 ---
 @client.event
 async def on_voice_state_update(member, before, after):
-    if member.bot:
-        return
-
+    if member.bot: return
     now = datetime.now(timezone.utc)
-    
     if after.channel and after.channel.id in TARGET_VC_IDS and (not before.channel or before.channel.id not in TARGET_VC_IDS):
         active_sessions[member.id] = now
         logging.info(f"{member.display_name} joined target VC {after.channel.name}. Session started.")
-
     elif before.channel and before.channel.id in TARGET_VC_IDS and (not after.channel or after.channel.id not in TARGET_VC_IDS):
         if member.id in active_sessions:
             join_time = active_sessions.pop(member.id)
             duration = (now - join_time).total_seconds()
-            
             times = load_work_times()
             user_id_str = str(member.id)
             times[user_id_str] = times.get(user_id_str, 0) + duration
             save_work_times(times)
-            
             formatted_duration = format_duration(duration)
             logging.info(f"{member.display_name} left target VC {before.channel.name}. Session duration: {formatted_duration}")
-            
-            # --- ここからが追加した処理 ---
             try:
                 await member.send(f"お疲れ様！今回の作業時間は **{formatted_duration}** だったよ。")
                 logging.info(f"Sent work time notification to {member.display_name}.")
@@ -244,28 +237,40 @@ async def on_voice_state_update(member, before, after):
                 logging.warning(f"Could not send DM to {member.display_name}. They might have DMs disabled.")
             except Exception as e:
                 logging.error(f"Failed to send DM to {member.display_name}: {e}")
-            # --- ここまでが追加した処理 ---
 
 # --- 新しいスラッシュコマンド ---
 @client.tree.command(name="worktime", description="指定したメンバーの累計作業時間を表示します。")
 async def worktime(interaction: discord.Interaction, member: discord.Member):
     await interaction.response.defer() 
-    
     times = load_work_times()
     user_id_str = str(member.id)
     total_seconds = times.get(user_id_str, 0)
-    
     if member.id in active_sessions:
         join_time = active_sessions[member.id]
         current_session_duration = (datetime.now(timezone.utc) - join_time).total_seconds()
         total_seconds += current_session_duration
-
     formatted_time = format_duration(total_seconds)
     await interaction.followup.send(f"{member.mention} さんの累計作業時間は **{formatted_time}** です。")
 
+
 # --- メイン処理 ---
 if __name__ == "__main__":
-    if TOKEN:
-        client.run(TOKEN)
-    else:
-        logging.error("DISCORD_BOT_TOKEN not found. Make sure it is set.")
+    RECONNECT_DELAY = 300 # 5分
+
+    while True:
+        try:
+            if TOKEN:
+                client.run(TOKEN)
+            else:
+                logging.error("DISCORD_BOT_TOKEN not found. Exiting.")
+                break 
+        except discord.errors.HTTPException as e:
+            if e.status == 429:
+                logging.warning(f"We are being rate-limited. Waiting for {RECONNECT_DELAY} seconds before reconnecting.")
+                time.sleep(RECONNECT_DELAY)
+            else:
+                logging.error(f"An unhandled HTTP exception occurred: {e}")
+                raise
+        except Exception as e:
+            logging.error(f"An unexpected error occurred in the main run loop: {e}")
+            time.sleep(60)
