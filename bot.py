@@ -4,6 +4,8 @@ import os
 import json
 from datetime import datetime, timedelta, timezone
 import logging
+import re
+import asyncio # <--- これが追加された重要な一行！
 
 # --- ロギング設定 ---
 logging.basicConfig(level=logging.INFO)
@@ -55,39 +57,29 @@ async def periodic_role_check():
                 await author_member.add_roles(intro_role, reason="自己紹介の履歴をチェックして付与")
                 welcome_channel = client.get_channel(WELCOME_CHANNEL_ID)
                 if welcome_channel:
-                    await welcome_channel.send(f"🎉{author_member.mention}さん、ようこそ「作業場235」へ！VCが開放されたよ、自由に使ってね！")
+                    await welcome_channel.send(f"🎉{author_member.mention}さん、ようこそ「作業場235」へ！VCが開放されたよ、自由に使ってね！ (履歴チェックより)")
     except Exception as e:
         logging.error(f"Error in periodic_role_check: {e}")
     logging.info("--- Periodic role check finished ---")
 
 
-# --- Bumpリマインダー機能 ---@tasks.loop(minutes=15)
+# --- Bumpリマインダー機能 ---
+@tasks.loop(minutes=15)
 async def check_bump_reminder():
-    """DISBOARD Botの最後の発言から2時間経過していたら通知する"""
+    logging.info("--- Running bump reminder check (DISBOARD author specific) ---")
     try:
-        logging.info("--- Running bump reminder check (DISBOARD author specific) ---")
         bump_channel = client.get_channel(BUMP_CHANNEL_ID)
-        if not bump_channel:
-            logging.warning("-> Exit: Bump channel not found.")
-            return
-        logging.info("-> Step 1: Bump channel found.")
+        if not bump_channel: return
 
-        # チャンネルの最後のメッセージをより安全な方法で取得
         last_message_in_channel = None
         async for message in bump_channel.history(limit=1):
             last_message_in_channel = message
-
-        if not last_message_in_channel:
-            logging.info("-> Exit: No messages found in bump channel at all.")
-            return
-        logging.info(f"-> Step 2: Last message in channel is from '{last_message_in_channel.author.name}'.")
+        
+        if not last_message_in_channel: return
             
         if last_message_in_channel.author == client.user:
-            logging.info("-> Exit: Last message was our own reminder.")
             return
-        logging.info("-> Step 3: Last message is not from our bot.")
 
-        # チャンネルの履歴を遡って、DISBOARD Botの最後の発言を探す
         last_disboard_message = None
         disboard_bot_id = 302050872383242240
         async for message in bump_channel.history(limit=100):
@@ -95,37 +87,29 @@ async def check_bump_reminder():
                 last_disboard_message = message
                 break
 
-        if not last_disboard_message:
-            logging.info("-> Exit: No DISBOARD message found in recent history.")
-            return
-        logging.info(f"-> Step 4: Found last DISBOARD message at {last_disboard_message.created_at.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        if not last_disboard_message: return
 
-        # DISBOARD Botの最後の発言から2時間経過したかチェック
         two_hours_after_disboard_message = last_disboard_message.created_at + timedelta(hours=2)
-        current_time_utc = datetime.now(timezone.utc)
-        
-        logging.info(f"-> Step 5: Checking time. Current: {current_time_utc.strftime('%Y-%m-%d %H:%M:%S UTC')}, Target: {two_hours_after_disboard_message.strftime('%Y-%m-%d %H:%M:%S UTC')}")
-
-        if current_time_utc >= two_hours_after_disboard_message:
-            logging.info("-> Condition MET: 2 hours have passed. Sending reminder.")
+        if datetime.now(timezone.utc) >= two_hours_after_disboard_message:
             await bump_channel.send("みんな、DISBOARDの **/bump** の時間だよ！\nサーバーの表示順を上げて、新しい仲間を増やそう！")
-        else:
-            logging.info("-> Condition NOT MET: Not yet 2 hours.")
 
     except discord.errors.Forbidden:
-        logging.error("-> FATAL: Missing permissions to read message history in bump channel.")
+        logging.error("Missing permissions to read message history in bump channel.")
     except Exception as e:
-        logging.error(f"-> FATAL: An unexpected error occurred: {e}")
-    finally:
-        logging.info("--- Bump reminder check finished ---")
-
+        logging.error(f"Error in check_bump_reminder: {e}")
+    logging.info("--- Bump reminder check finished ---")
 
 # --- Bot起動時の処理 ---
 @client.event
 async def on_ready():
     logging.info(f'Logged in as {client.user}')
+    
+    # 起動直後にタスクが集中しないように、60秒待機する
+    await asyncio.sleep(60) 
+
     if not os.path.exists('data'):
         os.makedirs('data')
+    
     if not check_bump_reminder.is_running():
         check_bump_reminder.start()
     if not periodic_role_check.is_running():
@@ -147,48 +131,52 @@ async def on_message(message):
             if welcome_channel:
                 await welcome_channel.send(f"🎉{author_member.mention}さん、ようこそ「作業場235」へ！VCが開放されたよ、自由に使ってね！")
 
-    # --- Bump成功メッセージの処理（ロジック最終版） ---
+    # Bump成功メッセージの処理
     if message.channel.id == BUMP_CHANNEL_ID and message.author.id == 302050872383242240:
-        # 返信元のメッセージ（〇〇さんが/bumpを使用しました）が存在するかどうかをチェック
-        if message.reference and message.reference.message_id:
-            try:
-                # 返信元のメッセージを実際に取得しにいく
-                referenced_message = await message.channel.fetch_message(message.reference.message_id)
-                # そのメッセージの投稿者こそが、Bumpしたユーザーだ！
-                user = referenced_message.author
-                
-                logging.info(f"Bump detected by {user.display_name} via reply reference.")
-
-                # --- 記録・報告処理 ---
+        if "表示順をアップしたよ" in message.content:
+            user = None
+            if message.reference and message.reference.message_id:
+                try:
+                    referenced_message = await message.channel.fetch_message(message.reference.message_id)
+                    user = referenced_message.author
+                except (discord.NotFound, discord.HTTPException):
+                    pass # 返信元が取得できなくても、他の方法で試す
+            
+            if not user and message.interaction:
+                user = message.interaction.user
+            
+            if not user and message.embeds:
+                for embed in message.embeds:
+                    if embed.description:
+                        match = re.search(r'<@!?(\d+)>', embed.description)
+                        if match:
+                            user_id = int(match.group(1))
+                            try:
+                                user = await client.fetch_user(user_id)
+                                break
+                            except discord.NotFound:
+                                pass
+            if user:
+                logging.info(f"Bump detected by {user.display_name}.")
                 counts = {}
                 if os.path.exists(BUMP_COUNT_FILE):
                     with open(BUMP_COUNT_FILE, 'r') as f:
                         try: counts = json.load(f)
                         except json.JSONDecodeError: pass
-                
                 user_id_str = str(user.id)
                 counts[user_id_str] = counts.get(user_id_str, 0) + 1
-                
                 with open(BUMP_COUNT_FILE, 'w') as f:
                     json.dump(counts, f, indent=2)
-
                 log_channel = client.get_channel(BUMP_LOG_CHANNEL_ID)
                 if log_channel:
                     guild = message.guild
                     report_lines = ["📈 **Bump実行回数レポート** 📈"]
                     sorted_counts = sorted(counts.items(), key=lambda item: item[1], reverse=True)
-
                     for uid, count in sorted_counts:
                         member = guild.get_member(int(uid))
                         user_name = member.display_name if member else f"ID: {uid}"
                         report_lines.append(f"・{user_name}: {count}回")
-                    
                     await log_channel.send("\n".join(report_lines))
-
-            except discord.NotFound:
-                logging.warning("Could not find the referenced message. It might have been deleted.")
-            except Exception as e:
-                logging.error(f"An error occurred while tracking bump via reply: {e}")
 
 # --- メイン処理 ---
 if __name__ == "__main__":
