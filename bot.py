@@ -69,6 +69,7 @@ class MyClient(discord.Client):
         except Exception as e:
             self.db_pool = None
             logging.error(f"Failed to connect to the database: {e}")
+            
         await self.tree.sync()
 
     async def close(self):
@@ -89,6 +90,7 @@ async def do_periodic_role_check(client: MyClient):
         async for message in intro_channel.history(limit=200, after=since):
             if message.author.bot or (isinstance(message.author, discord.Member) and intro_role in message.author.roles):
                 continue
+            
             author_member = guild.get_member(message.author.id)
             if author_member:
                 await author_member.add_roles(intro_role, reason="自己紹介の履歴をチェックして付与")
@@ -135,7 +137,6 @@ async def unified_background_loop(client: MyClient):
 
 # --- Botのセットアップと実行ロジック ---
 def setup_bot_events_and_commands():
-    # --- ここが修正点 ---
     intents = discord.Intents.default()
     intents.voice_states = True
     intents.guilds = True
@@ -144,7 +145,6 @@ def setup_bot_events_and_commands():
     intents.message_content = True
     
     client = MyClient(intents=intents)
-    # --- ここまでが修正点 ---
 
     @client.event
     async def on_ready():
@@ -253,6 +253,49 @@ def setup_bot_events_and_commands():
             total_seconds += current_session_duration
         formatted_time = format_duration(total_seconds)
         await interaction.followup.send(f"{member.mention} さんの累計作業時間は **{formatted_time}** です。")
+
+    # --- ここからが追加したコマンド ---
+    @client.tree.command(name="worktime_ranking", description="累計作業時間のトップ10ランキングを表示します。")
+    async def worktime_ranking(interaction: discord.Interaction):
+        if not client.db_pool:
+            await interaction.response.send_message("データベースに接続できていません。", ephemeral=True)
+            return
+        
+        await interaction.response.defer()
+
+        query = "SELECT user_id, total_seconds FROM work_logs ORDER BY total_seconds DESC LIMIT 10"
+        
+        try:
+            async with client.db_pool.acquire() as connection:
+                records = await connection.fetch(query)
+
+            if not records:
+                await interaction.followup.send("まだ作業時間の記録がありません。")
+                return
+
+            ranking_lines = []
+            for i, record in enumerate(records):
+                user_id = record['user_id']
+                total_seconds = record['total_seconds']
+                
+                member = interaction.guild.get_member(user_id)
+                user_name = member.display_name if member else f"ID: {user_id}"
+                
+                formatted_time = format_duration(total_seconds)
+                ranking_lines.append(f"**{i + 1}位**: {user_name} - {formatted_time}")
+
+            embed = discord.Embed(
+                title="🏆 累計作業時間ランキング 🏆",
+                description="\n".join(ranking_lines),
+                color=discord.Color.gold(),
+                timestamp=datetime.now(timezone.utc)
+            )
+            await interaction.followup.send(embed=embed)
+
+        except Exception as e:
+            logging.error(f"Error creating worktime ranking: {e}", exc_info=True)
+            await interaction.followup.send("ランキングの作成中にエラーが発生しました。", ephemeral=True)
+
 
     @client.tree.command(name="announce", description="指定したチャンネルにBotからお知らせを投稿します。(管理者限定)")
     @app_commands.describe(channel="投稿先のチャンネル")
