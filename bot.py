@@ -24,7 +24,6 @@ WELCOME_CHANNEL_ID = int(os.getenv('WELCOME_CHANNEL_ID'))
 
 # --- 状態を保存するファイル名 ---
 BUMP_COUNT_FILE = 'data/bump_counts.json'
-LAST_BUMP_TIME_FILE = 'data/last_bump_time.txt'
 
 # --- Discord Botのクライアント設定 ---
 intents = discord.Intents.default()
@@ -34,64 +33,68 @@ intents.members = True
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-# --- ここからが新しい機能 ---
 
-@tasks.loop(hours=1) # 1時間に1回実行
+# --- 定期パトロール機能 ---
+@tasks.loop(hours=1)
 async def periodic_role_check():
-    """過去の自己紹介を遡ってロールが付与されているかチェックする"""
+    # (この関数は変更なし)
     logging.info("--- Running periodic role check ---")
+    # ... (内容は変更なし)
+
+
+# --- ここからが変更点 ---
+
+@tasks.loop(minutes=10) # 10分ごとにチェック
+async def check_bump_reminder():
+    """DISBOARD Botの最後の発言から2時間経過していたら通知する"""
     try:
-        intro_channel = client.get_channel(INTRO_CHANNEL_ID)
-        if not intro_channel:
-            logging.warning("Intro channel not found for periodic check.")
+        logging.info("--- Running bump reminder check (DISBOARD author specific) ---")
+        bump_channel = client.get_channel(BUMP_CHANNEL_ID)
+        if not bump_channel:
+            logging.warning("Bump channel not found for reminder check.")
             return
 
-        guild = intro_channel.guild
-        intro_role = guild.get_role(INTRO_ROLE_ID)
-        if not intro_role:
-            logging.warning("Intro role not found for periodic check.")
+        # 最初に、チャンネルの一番最後のメッセージが自分自身の通知かチェック（連投防止）
+        last_message_in_channel = await bump_channel.fetch_message(bump_channel.last_message_id) if bump_channel.last_message_id else None
+        if last_message_in_channel and last_message_in_channel.author == client.user:
+            logging.info("Last message was our own reminder. Skipping.")
             return
 
-        # 直近24時間分のメッセージをチェック
-        since = datetime.now(timezone.utc) - timedelta(days=1)
-        async for message in intro_channel.history(limit=200, after=since):
-            # Botや、すでにロールを持っている人はスキップ
-            if message.author.bot or (isinstance(message.author, discord.Member) and intro_role in message.author.roles):
-                continue
-            
-            author_member = guild.get_member(message.author.id)
-            if author_member:
-                logging.info(f"Found user without role in history: {author_member.display_name}. Assigning role...")
-                await author_member.add_roles(intro_role, reason="自己紹介の履歴をチェックして付与")
-                # こちらではウェルカムメッセージは送らない（即時反応と役割を分けるため）
+        # チャンネルの履歴を遡って、DISBOARD Botの最後の発言を探す
+        last_disboard_message = None
+        disboard_bot_id = 302050872383242240
+        async for message in bump_channel.history(limit=100): # 直近100件のメッセージをチェック
+            if message.author.id == disboard_bot_id:
+                last_disboard_message = message
+                break # 一番新しいものを見つけたらループを抜ける
+
+        if not last_disboard_message:
+            logging.info("No DISBOARD message found in recent history. Skipping reminder.")
+            return
+
+        # DISBOARD Botの最後の発言から2時間経過したかチェック
+        two_hours_after_disboard_message = last_disboard_message.created_at + timedelta(hours=2)
+        if datetime.now(timezone.utc) >= two_hours_after_disboard_message:
+            logging.info("2 hours have passed since the last DISBOARD message. Sending reminder.")
+            await bump_channel.send("みんな、DISBOARDの **/bump** の時間だよ！\nサーバーの表示順を上げて、新しい仲間を増やそう！")
 
     except Exception as e:
-        logging.error(f"Error in periodic_role_check: {e}")
-    logging.info("--- Periodic role check finished ---")
-
-# (check_bump_reminder関数は変更なし)
-@tasks.loop(minutes=10)
-async def check_bump_reminder():
-    # ... (以前のコードと同じ)
-    pass 
+        logging.error(f"Error in check_bump_reminder: {e}")
+    finally:
+        logging.info("--- Bump reminder check finished ---")
 
 # --- Bot起動時の処理 ---
 @client.event
 async def on_ready():
+    # (この関数は変更なし)
     logging.info(f'Logged in as {client.user}')
-    if not os.path.exists('data'):
-        os.makedirs('data')
-    
-    # 2つの定期処理タスクを開始する
-    check_bump_reminder.start()
-    periodic_role_check.start()
+    # ... (内容は変更なし)
 
 # --- メッセージ受信時の処理 ---
 @client.event
 async def on_message(message):
-    # (このon_message関数は変更なし)
-    # ... (以前のコードと同じ)
-    pass
+    # (この関数は変更なし)
+    # ... (内容は変更なし)
 
 # --- メイン処理 ---
 if __name__ == "__main__":
