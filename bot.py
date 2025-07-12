@@ -63,7 +63,7 @@ class MyClient(discord.Client):
 
     async def setup_hook(self):
         try:
-            self.db_pool = await asyncpg.create_pool(dsn=DATABASE_URL, max_size=5)
+            self.db_pool = await asyncpg.create_pool(dsn=DATABASE_URL, min_size=1, max_size=5)
             logging.info("Successfully connected to the database.")
             async with self.db_pool.acquire() as connection:
                 await connection.execute('''
