@@ -13,39 +13,44 @@ import asyncpg
 # --- ロギング設定 ---
 logging.basicConfig(level=logging.INFO)
 
-# --- 環境変数からIDを取得 ---
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
-
-TOKEN = os.getenv('DISCORD_BOT_TOKEN')
-DATABASE_URL = os.getenv('DATABASE_URL')
-TARGET_VC_IDS_STR = os.getenv('TARGET_VC_IDS', '')
-TARGET_VC_IDS = {int(id_str.strip()) for id_str in TARGET_VC_IDS_STR.split(',') if id_str.strip().isdigit()}
-BUMP_CHANNEL_ID = int(os.getenv('BUMP_CHANNEL_ID', 0))
-BUMP_LOG_CHANNEL_ID = int(os.getenv('BUMP_LOG_CHANNEL_ID', 0))
-INTRO_CHANNEL_ID = int(os.getenv('INTRO_CHANNEL_ID', 0))
-INTRO_ROLE_ID = int(os.getenv('INTRO_ROLE_ID', 0))
-WELCOME_CHANNEL_ID = int(os.getenv('WELCOME_CHANNEL_ID', 0))
-WORK_LOG_CHANNEL_ID = int(os.getenv('WORK_LOG_CHANNEL_ID', 0))
-AUTO_NOTICE_VC_ID = int(os.getenv('AUTO_NOTICE_VC_ID', 0))
-NOTICE_ROLE_ID = int(os.getenv('NOTICE_ROLE_ID', 0))
-RECRUIT_CHANNEL_ID = 1389386628497412138
-
-# --- グローバル変数 ---
-active_sessions = {}
-
-# --- ヘルパー関数群 ---
-def format_duration(total_seconds):
-    if total_seconds is None or total_seconds < 0:
-        total_seconds = 0
-    hours, remainder = divmod(total_seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    return f"{int(hours)}時間 {int(minutes)}分 {int(seconds)}秒"
-
+# --- main関数を定義 ---
 def main():
+    # --- 環境変数からIDを取得 ---
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
+
+    TOKEN = os.getenv('DISCORD_BOT_TOKEN')
+    DATABASE_URL = os.getenv('DATABASE_URL')
+    TARGET_VC_IDS_STR = os.getenv('TARGET_VC_IDS', '')
+    TARGET_VC_IDS = {int(id_str.strip()) for id_str in TARGET_VC_IDS_STR.split(',') if id_str.strip().isdigit()}
+    BUMP_CHANNEL_ID = int(os.getenv('BUMP_CHANNEL_ID', 0))
+    BUMP_LOG_CHANNEL_ID = int(os.getenv('BUMP_LOG_CHANNEL_ID', 0))
+    INTRO_CHANNEL_ID = int(os.getenv('INTRO_CHANNEL_ID', 0))
+    INTRO_ROLE_ID = int(os.getenv('INTRO_ROLE_ID', 0))
+    WELCOME_CHANNEL_ID = int(os.getenv('WELCOME_CHANNEL_ID', 0))
+    WORK_LOG_CHANNEL_ID = int(os.getenv('WORK_LOG_CHANNEL_ID', 0))
+    AUTO_NOTICE_VC_ID = int(os.getenv('AUTO_NOTICE_VC_ID', 0))
+    NOTICE_ROLE_ID = int(os.getenv('NOTICE_ROLE_ID', 0))
+    RECRUIT_CHANNEL_ID = 1389386628497412138
+
+    # --- 状態を保存するファイル名 ---
+    BUMP_COUNT_FILE = 'data/bump_counts.json'
+    LAST_REMINDED_BUMP_ID_FILE = 'data/last_reminded_id.txt'
+
+    # --- グローバル変数 ---
+    active_sessions = {}
+
+    # --- ヘルパー関数 ---
+    def format_duration(total_seconds):
+        if total_seconds is None or total_seconds < 0:
+            total_seconds = 0
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{int(hours)}時間 {int(minutes)}分 {int(seconds)}秒"
+
     # --- Discord Botのクライアント設定 ---
     intents = discord.Intents.default()
     intents.voice_states = True
@@ -79,7 +84,7 @@ def main():
             except Exception as e:
                 self.db_pool = None
                 logging.error(f"Failed to connect to the database during setup: {e}")
-                
+            
             await self.tree.sync()
             logging.info("Command tree synced.")
 
@@ -95,7 +100,7 @@ def main():
 
     client = MyClient(intents=intents)
 
-    # --- バックグラウンド処理のヘルパー関数 ---
+    # --- バックグラウンド処理 ---
     async def do_periodic_role_check():
         try:
             intro_channel = client.get_channel(INTRO_CHANNEL_ID)
@@ -149,7 +154,6 @@ def main():
         except Exception as e:
             logging.error(f"Error in check_bump_reminder: {e}", exc_info=True)
 
-    # --- 統合された単一バックグラウンドループ ---
     @tasks.loop(minutes=15)
     async def unified_background_loop():
         if not client.is_ready() or not client.db_pool:
@@ -157,9 +161,7 @@ def main():
 
         client.loop_counter += 1
         logging.info(f"--- Running unified background loop (Cycle: {client.loop_counter}) ---")
-
         await do_bump_reminder_check()
-
         if client.loop_counter % 8 == 0:
             await do_periodic_role_check()
 
@@ -168,7 +170,7 @@ def main():
         await client.wait_until_ready()
         logging.info("Client is ready, unified background loop will start.")
 
-    # --- Bot起動時の処理 ---
+    # --- イベントハンドラとコマンド ---
     @client.event
     async def on_ready():
         logging.info(f'Logged in as {client.user} (ID: {client.user.id})')
@@ -176,7 +178,6 @@ def main():
         if not os.path.exists('data'):
             os.makedirs('data')
 
-    # --- イベントハンドラとコマンド ---
     @client.event
     async def on_message(message):
         if message.author == client.user: return
@@ -233,8 +234,7 @@ def main():
 
     @client.event
     async def on_voice_state_update(member, before, after):
-        if member.bot or not client.db_pool:
-            return
+        if member.bot: return
         now = datetime.now(timezone.utc)
         if after.channel and after.channel.id in TARGET_VC_IDS and (not before.channel or before.channel.id not in TARGET_VC_IDS):
             active_sessions[member.id] = now
@@ -243,12 +243,13 @@ def main():
             if member.id in active_sessions:
                 join_time = active_sessions.pop(member.id)
                 duration = (now - join_time).total_seconds()
-                async with client.db_pool.acquire() as connection:
-                    await connection.execute('''
-                        INSERT INTO work_logs (user_id, total_seconds) VALUES ($1, $2)
-                        ON CONFLICT (user_id) DO UPDATE
-                        SET total_seconds = work_logs.total_seconds + $2
-                    ''', member.id, duration)
+                if client.db_pool:
+                    async with client.db_pool.acquire() as connection:
+                        await connection.execute('''
+                            INSERT INTO work_logs (user_id, total_seconds) VALUES ($1, $2)
+                            ON CONFLICT (user_id) DO UPDATE
+                            SET total_seconds = work_logs.total_seconds + $2
+                        ''', member.id, duration)
                 formatted_duration = format_duration(duration)
                 logging.info(f"{member.display_name} left target VC {before.channel.name}. Session duration: {formatted_duration}")
                 log_channel = client.get_channel(WORK_LOG_CHANNEL_ID)
@@ -273,10 +274,11 @@ def main():
             return
         await interaction.response.defer()
         total_seconds = 0
-        async with client.db_pool.acquire() as connection:
-            record = await connection.fetchrow('SELECT total_seconds FROM work_logs WHERE user_id = $1', member.id)
-            if record:
-                total_seconds = record['total_seconds']
+        if client.db_pool:
+            async with client.db_pool.acquire() as connection:
+                record = await connection.fetchrow('SELECT total_seconds FROM work_logs WHERE user_id = $1', member.id)
+                if record:
+                    total_seconds = record['total_seconds']
         if member.id in active_sessions:
             join_time = active_sessions[member.id]
             current_session_duration = (datetime.now(timezone.utc) - join_time).total_seconds()
@@ -288,9 +290,7 @@ def main():
     @app_commands.describe(channel="投稿先のチャンネル")
     @app_commands.checks.has_permissions(administrator=True)
     async def announce(interaction: discord.Interaction, channel: discord.TextChannel):
-        announcement_text = """
-★お知らせ用メッセージ★
-"""
+        announcement_text = "..." # 省略
         try:
             await channel.send(announcement_text)
             await interaction.response.send_message(f"{channel.mention} にお知らせを投稿したよ。", ephemeral=True)
@@ -312,7 +312,7 @@ def main():
     else:
         logging.error("DISCORD_BOT_TOKEN not found.")
 
-# --- メイン処理 ---
+# --- メインの実行ブロック ---
 if __name__ == "__main__":
     RECONNECT_DELAY = 300
     while True:
