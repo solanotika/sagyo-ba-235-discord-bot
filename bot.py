@@ -112,14 +112,21 @@ def main():
                 self.db_pool = None
                 logging.error(f"Failed to connect to the database: {e}")
             
+            # --- ここからが修正点 ---
             if GUILD_ID:
                 guild_obj = discord.Object(id=int(GUILD_ID))
+                # サーバーの古いコマンドをクリア
+                self.tree.clear_commands(guild=guild_obj)
+                # グローバルコマンドをサーバーにコピー
                 self.tree.copy_global_to(guild=guild_obj)
+                # サーバーにコマンドを即時同期
                 await self.tree.sync(guild=guild_obj)
                 logging.info(f"Commands synced to guild {GUILD_ID}.")
             else:
+                # グローバルに同期
                 await self.tree.sync()
                 logging.info("Commands synced globally.")
+            # --- ここまでが修正点 ---
         
         async def close(self):
             if self.db_pool:
@@ -169,7 +176,6 @@ def main():
         if member.bot: return
         now = datetime.now(timezone.utc)
         
-        # 作業時間記録
         if after.channel and after.channel.id in TARGET_VC_IDS and (not before.channel or before.channel.id not in TARGET_VC_IDS):
             active_sessions[member.id] = now
         elif before.channel and before.channel.id in TARGET_VC_IDS and (not after.channel or after.channel.id not in TARGET_VC_IDS):
@@ -222,25 +228,39 @@ def main():
             logging.error(f"Error in worktime_ranking: {e}", exc_info=True)
             await interaction.followup.send("ランキングの取得中にエラーが発生しました。")
 
-    # 他のコマンドは変更なし
     @client.tree.command(name="worktime", description="指定したメンバーの累計作業時間を表示します。")
     async def worktime(interaction: discord.Interaction, member: discord.Member):
-        pass
+        if not client.db_pool: return await interaction.response.send_message("DB未接続です。", ephemeral=True)
+        await interaction.response.defer()
+        total_seconds = 0
+        if client.db_pool:
+            async with client.db_pool.acquire() as connection:
+                record = await connection.fetchrow('SELECT total_seconds FROM work_logs WHERE user_id = $1', member.id)
+                if record:
+                    total_seconds = record['total_seconds']
+        if member.id in active_sessions:
+            join_time = active_sessions[member.id]
+            total_seconds += (datetime.now(timezone.utc) - join_time).total_seconds()
+        await interaction.followup.send(f"{member.display_name} さんの累計作業時間は **{format_duration(total_seconds)}** です。")
+
     @client.tree.command(name="announce", description="指定したチャンネルにBotからお知らせを投稿します。(管理者限定)")
     @app_commands.checks.has_permissions(administrator=True)
     async def announce(interaction: discord.Interaction, channel: discord.TextChannel):
-        pass
+        await channel.send("★お知らせ用メッセージ入力欄★")
+        await interaction.response.send_message(f"{channel.mention} にお知らせを投稿しました。", ephemeral=True)
+
     @client.tree.command(name="setup_recruit", description="作業募集用のパネルを設置します。(管理者限定)")
     @app_commands.checks.has_permissions(administrator=True)
     async def setup_recruit(interaction: discord.Interaction):
-        pass
+        embed = discord.Embed(title="📢 作業仲間募集パネル", description="下のボタンを押すと、今いるボイスチャンネルへの招待リンク付きで募集が投稿されるよ！", color=discord.Color.green())
+        await interaction.channel.send(embed=embed, view=RecruitmentView())
+        await interaction.response.send_message("募集パネルを設置しました。", ephemeral=True)
 
     if TOKEN:
         client.run(TOKEN, reconnect=True)
     else:
         logging.error("TOKEN not found.")
 
-# --- メイン実行ブロック ---
 if __name__ == "__main__":
     while True:
         try:
