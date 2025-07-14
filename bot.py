@@ -27,17 +27,16 @@ def main():
     TARGET_VC_IDS_STR = os.getenv('TARGET_VC_IDS', '')
     TARGET_VC_IDS = {int(id_str.strip()) for id_str in TARGET_VC_IDS_STR.split(',') if id_str.strip().isdigit()}
     BUMP_CHANNEL_ID = int(os.getenv('BUMP_CHANNEL_ID', 0))
-    BUMP_LOG_CHANNEL_ID = int(os.getenv('BUMP_LOG_CHANNEL_ID', 0))
     INTRO_CHANNEL_ID = int(os.getenv('INTRO_CHANNEL_ID', 0))
     INTRO_ROLE_ID = int(os.getenv('INTRO_ROLE_ID', 0))
     WELCOME_CHANNEL_ID = int(os.getenv('WELCOME_CHANNEL_ID', 0))
     WORK_LOG_CHANNEL_ID = int(os.getenv('WORK_LOG_CHANNEL_ID', 0))
     AUTO_NOTICE_VC_ID = int(os.getenv('AUTO_NOTICE_VC_ID', 0))
     NOTICE_ROLE_ID = int(os.getenv('NOTICE_ROLE_ID', 0))
-    RECRUIT_CHANNEL_ID = 1389386628497412138
+    ADMIN_USER_ID = int(os.getenv('ADMIN_USER_ID', 0))
+    RECRUIT_CHANNEL_ID = int(os.getenv('RECRUIT_CHANNEL_ID', 0))
 
     # --- 状態を保存するファイル名 ---
-    BUMP_COUNT_FILE = 'data/bump_counts.json'
     LAST_REMINDED_BUMP_ID_FILE = 'data/last_reminded_id.txt'
 
     # --- グローバル変数 ---
@@ -58,6 +57,7 @@ def main():
     intents.members = True
     intents.messages = True
     intents.message_content = True
+    intents.reactions = True
 
     class MyClient(discord.Client):
         def __init__(self, *, intents: discord.Intents):
@@ -102,26 +102,8 @@ def main():
 
     # --- バックグラウンド処理 ---
     async def do_periodic_role_check():
-        try:
-            intro_channel = client.get_channel(INTRO_CHANNEL_ID)
-            if not intro_channel: return
-            guild = intro_channel.guild
-            intro_role = guild.get_role(INTRO_ROLE_ID)
-            if not intro_role: return
-
-            since = datetime.now(timezone.utc) - timedelta(days=1)
-            async for message in intro_channel.history(limit=200, after=since):
-                if message.author.bot or (isinstance(message.author, discord.Member) and intro_role in message.author.roles):
-                    continue
-                
-                author_member = guild.get_member(message.author.id)
-                if author_member:
-                    await author_member.add_roles(intro_role, reason="自己紹介の履歴をチェックして付与")
-                    welcome_channel = client.get_channel(WELCOME_CHANNEL_ID)
-                    if welcome_channel:
-                        await welcome_channel.send(f"🎉{author_member.mention}さん、ようこそ「作業場235」へ！VCが開放されたよ、自由に使ってね！ (履歴チェックより)")
-        except Exception as e:
-            logging.error(f"Error in periodic_role_check: {e}")
+        # ② 自己紹介チャンネルの履歴を遡ってロールを付与する機能を削除
+        pass
 
     async def do_bump_reminder_check():
         try:
@@ -156,7 +138,7 @@ def main():
 
     @tasks.loop(minutes=15)
     async def unified_background_loop():
-        if not client.is_ready() or not client.db_pool:
+        if not client.is_ready():
             return
 
         client.loop_counter += 1
@@ -182,55 +164,56 @@ def main():
     async def on_message(message):
         if message.author == client.user: return
         if message.author.bot and message.author.id != 302050872383242240: return
-        if message.channel.id == INTRO_CHANNEL_ID and not message.author.bot:
-            author_member = message.guild.get_member(message.author.id)
-            intro_role = message.guild.get_role(INTRO_ROLE_ID)
-            if intro_role and author_member and intro_role not in author_member.roles:
-                await author_member.add_roles(intro_role, reason="自己紹介の投稿")
-                welcome_channel = client.get_channel(WELCOME_CHANNEL_ID)
-                if welcome_channel:
-                    await welcome_channel.send(f"🎉{author_member.mention}さん、ようこそ「作業場235」へ！VCが開放されたよ、自由に使ってね！")
+        
+        # ③ ユーザー別の/bump実行回数カウント機能を削除
         if message.channel.id == BUMP_CHANNEL_ID and message.author.id == 302050872383242240:
             if "表示順をアップしたよ" in message.content:
-                user = None
-                if message.reference and message.reference.message_id:
-                    try:
-                        referenced_message = await message.channel.fetch_message(message.reference.message_id)
-                        user = referenced_message.author
-                    except (discord.NotFound, discord.HTTPException): pass
-                if not user and message.interaction:
-                    user = message.interaction.user
-                if not user and message.embeds:
-                    for embed in message.embeds:
-                        if embed.description:
-                            match = re.search(r'<@!?(\d+)>', embed.description)
-                            if match:
-                                user_id = int(match.group(1))
-                                try:
-                                    user = await client.fetch_user(user_id)
-                                    break
-                                except discord.NotFound: pass
-                if user:
-                    logging.info(f"Bump detected by {user.display_name}.")
-                    counts = {}
-                    if os.path.exists(BUMP_COUNT_FILE):
-                        with open(BUMP_COUNT_FILE, 'r') as f:
-                            try: counts = json.load(f)
-                            except json.JSONDecodeError: pass
-                    user_id_str = str(user.id)
-                    counts[user_id_str] = counts.get(user_id_str, 0) + 1
-                    with open(BUMP_COUNT_FILE, 'w') as f:
-                        json.dump(counts, f, indent=2)
-                    log_channel = client.get_channel(BUMP_LOG_CHANNEL_ID)
-                    if log_channel:
-                        guild = message.guild
-                        report_lines = ["📈 **Bump実行回数レポート** 📈"]
-                        sorted_counts = sorted(counts.items(), key=lambda item: item[1], reverse=True)
-                        for uid, count in sorted_counts:
-                            member = guild.get_member(int(uid))
-                            user_name = member.display_name if member else f"ID: {uid}"
-                            report_lines.append(f"・{user_name}: {count}回")
-                        await log_channel.send("\n".join(report_lines))
+                logging.info(f"Bump success message detected.")
+
+
+    @client.event
+    async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+        if payload.channel_id != INTRO_CHANNEL_ID:
+            return
+        if payload.user_id != ADMIN_USER_ID:
+            return
+        if str(payload.emoji) != '👌':
+            return
+        
+        try:
+            channel = client.get_channel(payload.channel_id)
+            if not channel: return
+            message = await channel.fetch_message(payload.message_id)
+            author_member = message.author
+
+            if not isinstance(author_member, discord.Member):
+                # メンバーでない場合（サーバーから退出済みなど）
+                # ギルドオブジェクトからメンバーを再取得してみる
+                guild = client.get_guild(payload.guild_id)
+                if not guild: return
+                author_member = await guild.fetch_member(author_member.id)
+                if not author_member: return
+
+            intro_role = message.guild.get_role(INTRO_ROLE_ID)
+
+            if intro_role and intro_role not in author_member.roles:
+                # payload.member はリアクションを押したメンバーオブジェクト
+                # 権限チェックのために guild.me を使う
+                admin_member = message.guild.get_member(payload.user_id)
+                if not admin_member: 
+                    admin_member = await message.guild.fetch_member(payload.user_id)
+
+                await author_member.add_roles(intro_role, reason=f"Admin ({admin_member.display_name}) approved.")
+                logging.info(f"Role '{intro_role.name}' given to {author_member.display_name} by admin approval.")
+
+                welcome_channel = client.get_channel(WELCOME_CHANNEL_ID)
+                if welcome_channel:
+                    await welcome_channel.send(f"🎉{author_member.mention}さん、ようこそ「作業場235」へ！VCが開放されたよ、自由に使ってね！ (管理人承認済み)")
+            else:
+                logging.info(f"{author_member.display_name} already has the role or role not found.")
+
+        except Exception as e:
+            logging.error(f"Error in on_raw_reaction_add: {e}", exc_info=True)
 
     @client.event
     async def on_voice_state_update(member, before, after):
@@ -290,7 +273,8 @@ def main():
     @app_commands.describe(channel="投稿先のチャンネル")
     @app_commands.checks.has_permissions(administrator=True)
     async def announce(interaction: discord.Interaction, channel: discord.TextChannel):
-        announcement_text = "..." # 省略
+        # ① アナウンス用メッセージの内容を変更
+        announcement_text = "★お知らせ用メッセージ入力欄★"
         try:
             await channel.send(announcement_text)
             await interaction.response.send_message(f"{channel.mention} にお知らせを投稿したよ。", ephemeral=True)
