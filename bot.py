@@ -24,6 +24,7 @@ def main():
 
     TOKEN = os.getenv('DISCORD_BOT_TOKEN')
     DATABASE_URL = os.getenv('DATABASE_URL')
+    GUILD_ID = os.getenv('GUILD_ID')
     TARGET_VC_IDS_STR = os.getenv('TARGET_VC_IDS', '')
     TARGET_VC_IDS = {int(id_str.strip()) for id_str in TARGET_VC_IDS_STR.split(',') if id_str.strip().isdigit()}
     BUMP_CHANNEL_ID = int(os.getenv('BUMP_CHANNEL_ID', 0))
@@ -42,7 +43,7 @@ def main():
     # --- グローバル変数 ---
     active_sessions = {}
 
-    # --- ヘルパー関数：時間フォーマット ---
+    # --- ヘルパー関数 ---
     def format_duration(total_seconds):
         if total_seconds is None or total_seconds < 0:
             total_seconds = 0
@@ -118,8 +119,14 @@ def main():
                 self.db_pool = None
                 logging.error(f"Failed to connect to the database during setup: {e}")
             
-            await self.tree.sync()
-            logging.info("Command tree synced.")
+            if GUILD_ID:
+                guild_obj = discord.Object(id=int(GUILD_ID))
+                self.tree.copy_global_to(guild=guild_obj)
+                await self.tree.sync(guild=guild_obj)
+                logging.info(f"Commands synced to guild {GUILD_ID}.")
+            else:
+                await self.tree.sync()
+                logging.info("Commands synced globally.")
 
             if not unified_background_loop.is_running():
                 unified_background_loop.start()
@@ -135,7 +142,7 @@ def main():
 
     # --- バックグラウンド処理 ---
     async def do_periodic_role_check():
-        pass # 機能削除済み
+        pass
 
     async def do_bump_reminder_check():
         try:
@@ -184,7 +191,7 @@ def main():
         await client.wait_until_ready()
         logging.info("Client is ready, unified background loop will start.")
 
-    # --- イベント：Bot起動時 ---
+    # --- イベントハンドラとコマンド ---
     @client.event
     async def on_ready():
         logging.info(f'Logged in as {client.user} (ID: {client.user.id})')
@@ -192,34 +199,29 @@ def main():
         if not os.path.exists('data'):
             os.makedirs('data')
 
-    # --- イベント：メッセージ受信時 ---
     @client.event
     async def on_message(message):
         if message.author == client.user: return
         if message.author.bot and message.author.id != 302050872383242240: return
         
-        # Bump成功メッセージの検知 (ログ出力のみ)
         if message.channel.id == BUMP_CHANNEL_ID and message.author.id == 302050872383242240:
             if "表示順をアップしたよ" in message.content:
                 logging.info(f"Bump success message detected.")
 
-    # --- イベント：リアクション追加時 ---
     @client.event
     async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
-        # 条件チェック
         if payload.channel_id != INTRO_CHANNEL_ID: return
         if str(payload.emoji) != '👌': return
         if not payload.member or payload.member.bot: return
 
-        # 権限チェック
         reactor = payload.member
         admin_role = reactor.guild.get_role(ADMIN_ROLE_ID)
+        
         is_admin_user = (reactor.id == ADMIN_USER_ID)
         has_admin_role = (admin_role is not None and admin_role in reactor.roles)
         if not (is_admin_user or has_admin_role): return
         
         try:
-            # ロール付与処理
             channel = client.get_channel(payload.channel_id)
             if not channel: return
             message = await channel.fetch_message(payload.message_id)
@@ -250,53 +252,50 @@ def main():
         except Exception as e:
             logging.error(f"Error in on_raw_reaction_add: {e}", exc_info=True)
 
-    # --- イベント：ボイスチャンネル状態更新時 ---
     @client.event
     async def on_voice_state_update(member, before, after):
-        # 作業時間記録
-        if not member.bot:
-            now = datetime.now(timezone.utc)
-            if after.channel and after.channel.id in TARGET_VC_IDS and (not before.channel or before.channel.id not in TARGET_VC_IDS):
-                active_sessions[member.id] = now
-                logging.info(f"{member.display_name} joined target VC {after.channel.name}. Session started.")
-            elif before.channel and before.channel.id in TARGET_VC_IDS and (not after.channel or after.channel.id not in TARGET_VC_IDS):
-                if member.id in active_sessions:
-                    join_time = active_sessions.pop(member.id)
-                    duration = (now - join_time).total_seconds()
-                    total_seconds_after_update = 0
+        if member.bot: return
+        now = datetime.now(timezone.utc)
+        if after.channel and after.channel.id in TARGET_VC_IDS and (not before.channel or before.channel.id not in TARGET_VC_IDS):
+            active_sessions[member.id] = now
+            logging.info(f"{member.display_name} joined target VC {after.channel.name}. Session started.")
+        elif before.channel and before.channel.id in TARGET_VC_IDS and (not after.channel or after.channel.id not in TARGET_VC_IDS):
+            if member.id in active_sessions:
+                join_time = active_sessions.pop(member.id)
+                duration = (now - join_time).total_seconds()
+                total_seconds_after_update = 0
 
-                    if client.db_pool:
-                        async with client.db_pool.acquire() as connection:
-                            await connection.execute('''
-                                INSERT INTO work_logs (user_id, total_seconds) VALUES ($1, $2)
-                                ON CONFLICT (user_id) DO UPDATE
-                                SET total_seconds = work_logs.total_seconds + $2
-                            ''', member.id, duration)
-                            
-                            record = await connection.fetchrow('SELECT total_seconds FROM work_logs WHERE user_id = $1', member.id)
-                            if record:
-                                total_seconds_after_update = record['total_seconds']
+                if client.db_pool:
+                    async with client.db_pool.acquire() as connection:
+                        await connection.execute('''
+                            INSERT INTO work_logs (user_id, total_seconds) VALUES ($1, $2)
+                            ON CONFLICT (user_id) DO UPDATE
+                            SET total_seconds = work_logs.total_seconds + $2
+                        ''', member.id, duration)
+                        
+                        record = await connection.fetchrow('SELECT total_seconds FROM work_logs WHERE user_id = $1', member.id)
+                        if record:
+                            total_seconds_after_update = record['total_seconds']
 
-                    formatted_duration = format_duration(duration)
-                    formatted_total_duration = format_duration(total_seconds_after_update)
-                    
-                    log_channel = client.get_channel(WORK_LOG_CHANNEL_ID)
-                    if log_channel:
-                        message_to_send = (
-                            f"{member.mention}\n"
-                            f"お疲れ様、{member.display_name}！\n"
-                            f"今回の作業時間は **{formatted_duration}** だったよ。\n"
-                            f"累計作業時間は **{formatted_total_duration}** だよ。"
-                        )
-                        await log_channel.send(message_to_send)
+                formatted_duration = format_duration(duration)
+                formatted_total_duration = format_duration(total_seconds_after_update)
+                
+                log_channel = client.get_channel(WORK_LOG_CHANNEL_ID)
+                if log_channel:
+                    message_to_send = (
+                        f"{member.mention}\n"
+                        f"お疲れ様、{member.display_name}！\n"
+                        f"今回の作業時間は **{formatted_duration}** だったよ。\n"
+                        f"累計作業時間は **{formatted_total_duration}** だよ。"
+                    )
+                    await log_channel.send(message_to_send)
 
     # --- スラッシュコマンド群 ---
     
-    # /worktime コマンド
     @client.tree.command(name="worktime", description="指定したメンバーの累計作業時間を表示します。")
     async def worktime(interaction: discord.Interaction, member: discord.Member):
         if not client.db_pool:
-            await interaction.response.send_message("データベースに接続できていません。管理者に連絡してください。", ephemeral=True)
+            await interaction.response.send_message("データベースに接続できていません。", ephemeral=True)
             return
         await interaction.response.defer()
         total_seconds = 0
@@ -312,7 +311,6 @@ def main():
         formatted_time = format_duration(total_seconds)
         await interaction.followup.send(f"{member.display_name} さんの累計作業時間は **{formatted_time}** です。")
 
-    # /announce コマンド
     @client.tree.command(name="announce", description="指定したチャンネルにBotからお知らせを投稿します。(管理者限定)")
     @app_commands.describe(channel="投稿先のチャンネル")
     @app_commands.checks.has_permissions(administrator=True)
@@ -333,7 +331,6 @@ def main():
         else:
             await interaction.response.send_message(f"コマンドの実行中にエラーが発生しました: {error}", ephemeral=True)
     
-    # /setup_recruit コマンド
     @client.tree.command(name="setup_recruit", description="作業募集用のパネルを設置します。(管理者限定)")
     @app_commands.checks.has_permissions(administrator=True)
     async def setup_recruit(interaction: discord.Interaction):
@@ -351,6 +348,64 @@ def main():
             await interaction.response.send_message("このコマンドは管理者しか使えないよ。", ephemeral=True)
         else:
             await interaction.response.send_message(f"コマンドの実行中にエラーが発生しました: {error}", ephemeral=True)
+
+    # --- ここからが追加したコマンド ---
+    @client.tree.command(name="worktime_ranking", description="累計作業時間のトップ10ランキングを表示します。")
+    async def worktime_ranking(interaction: discord.Interaction):
+        if not client.db_pool:
+            await interaction.response.send_message("データベースに接続できていません。", ephemeral=True)
+            return
+        
+        await interaction.response.defer()
+
+        try:
+            async with client.db_pool.acquire() as connection:
+                query = """
+                    SELECT user_id, total_seconds 
+                    FROM work_logs 
+                    WHERE total_seconds > 0
+                    ORDER BY total_seconds DESC 
+                    LIMIT 10;
+                """
+                records = await connection.fetch(query)
+
+            if not records:
+                await interaction.followup.send("まだ誰も作業記録がありません。")
+                return
+
+            embed = discord.Embed(
+                title="🏆 作業時間ランキング TOP10",
+                description="サーバー内での累計作業時間ランキングです。",
+                color=discord.Color.gold(),
+                timestamp=datetime.now(timezone.utc)
+            )
+
+            rank_emojis = ["🥇", "🥈", "🥉"]
+            
+            for i, record in enumerate(records):
+                user_id = record['user_id']
+                total_seconds = record['total_seconds']
+                
+                member = interaction.guild.get_member(user_id)
+                user_name = member.display_name if member else f"ID: {user_id} (元メンバー)"
+                
+                rank = rank_emojis[i] if i < 3 else f"**{i+1}位**"
+                
+                formatted_time = format_duration(total_seconds)
+                
+                embed.add_field(
+                    name=f"{rank}：{user_name}",
+                    value=f"```{formatted_time}```",
+                    inline=False
+                )
+            
+            embed.set_footer(text=f"集計日時: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
+            await interaction.followup.send(embed=embed)
+
+        except Exception as e:
+            logging.error(f"Error in worktime_ranking command: {e}", exc_info=True)
+            await interaction.followup.send("ランキングの取得中にエラーが発生しました。")
+
 
     # Botを起動
     if TOKEN:
