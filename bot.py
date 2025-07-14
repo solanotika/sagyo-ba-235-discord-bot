@@ -35,6 +35,7 @@ def main():
     NOTICE_ROLE_ID = int(os.getenv('NOTICE_ROLE_ID', 0))
     ADMIN_USER_ID = int(os.getenv('ADMIN_USER_ID', 0))
     RECRUIT_CHANNEL_ID = int(os.getenv('RECRUIT_CHANNEL_ID', 0))
+    ADMIN_ROLE_ID = int(os.getenv('ADMIN_ROLE_ID', 0)) # 追加
 
     # --- 状態を保存するファイル名 ---
     LAST_REMINDED_BUMP_ID_FILE = 'data/last_reminded_id.txt'
@@ -170,12 +171,28 @@ def main():
 
     @client.event
     async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+        # リアクションが自己紹介チャンネルでなければ無視
         if payload.channel_id != INTRO_CHANNEL_ID:
             return
-        if payload.user_id != ADMIN_USER_ID:
-            return
+        # リアクションが「👌」でなければ無視
         if str(payload.emoji) != '👌':
             return
+        # リアクションしたのがBotなら無視
+        if payload.member.bot:
+            return
+
+        # --- ここからが修正点 ---
+        # リアクションした人が「君」または「管理者ロール持ち」かチェック
+        reactor = payload.member
+        admin_role = reactor.guild.get_role(ADMIN_ROLE_ID)
+        
+        is_admin_user = (reactor.id == ADMIN_USER_ID)
+        has_admin_role = (admin_role is not None and admin_role in reactor.roles)
+
+        # 上記のどちらでもなければ、処理を中断
+        if not (is_admin_user or has_admin_role):
+            return
+        # --- ここまでが修正点 ---
         
         try:
             channel = client.get_channel(payload.channel_id)
@@ -192,16 +209,11 @@ def main():
             intro_role = message.guild.get_role(INTRO_ROLE_ID)
 
             if intro_role and intro_role not in author_member.roles:
-                admin_member = message.guild.get_member(payload.user_id)
-                if not admin_member: 
-                    admin_member = await message.guild.fetch_member(payload.user_id)
-
-                await author_member.add_roles(intro_role, reason=f"Admin ({admin_member.display_name}) approved.")
-                logging.info(f"Role '{intro_role.name}' given to {author_member.display_name} by admin approval.")
+                await author_member.add_roles(intro_role, reason=f"Admin ({reactor.display_name}) approved.")
+                logging.info(f"Role '{intro_role.name}' given to {author_member.display_name} by admin approval from {reactor.display_name}.")
 
                 welcome_channel = client.get_channel(WELCOME_CHANNEL_ID)
                 if welcome_channel:
-                    # --- ここが修正点 ---
                     message_to_send = (
                         f"{author_member.mention}\n"
                         f"🎉{author_member.display_name}さん、ようこそ「作業場235」へ！VCが開放されたよ、自由に使ってね！"
@@ -224,6 +236,8 @@ def main():
             if member.id in active_sessions:
                 join_time = active_sessions.pop(member.id)
                 duration = (now - join_time).total_seconds()
+                total_seconds_after_update = 0
+
                 if client.db_pool:
                     async with client.db_pool.acquire() as connection:
                         await connection.execute('''
@@ -231,11 +245,26 @@ def main():
                             ON CONFLICT (user_id) DO UPDATE
                             SET total_seconds = work_logs.total_seconds + $2
                         ''', member.id, duration)
+                        
+                        record = await connection.fetchrow('SELECT total_seconds FROM work_logs WHERE user_id = $1', member.id)
+                        if record:
+                            total_seconds_after_update = record['total_seconds']
+
                 formatted_duration = format_duration(duration)
-                logging.info(f"{member.display_name} left target VC {before.channel.name}. Session duration: {formatted_duration}")
+                formatted_total_duration = format_duration(total_seconds_after_update)
+                
+                logging.info(f"{member.display_name} left target VC {before.channel.name}. Session duration: {formatted_duration}. New total: {formatted_total_duration}")
+                
                 log_channel = client.get_channel(WORK_LOG_CHANNEL_ID)
                 if log_channel:
-                    await log_channel.send(f"お疲れ様、{member.display_name}！今回の作業時間は **{formatted_duration}** だったよ。")
+                    message_to_send = (
+                        f"{member.mention}\n"
+                        f"お疲れ様、{member.display_name}！\n"
+                        f"今回の作業時間は **{formatted_duration}** だったよ。\n"
+                        f"累計作業時間は **{formatted_total_duration}** だよ。"
+                    )
+                    await log_channel.send(message_to_send)
+                    
         if after.channel and after.channel.id == AUTO_NOTICE_VC_ID:
             if len(after.channel.members) == 1 and (not before.channel or before.channel.id != AUTO_NOTICE_VC_ID):
                 recruit_channel = client.get_channel(RECRUIT_CHANNEL_ID)
