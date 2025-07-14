@@ -31,11 +31,10 @@ def main():
     INTRO_ROLE_ID = int(os.getenv('INTRO_ROLE_ID', 0))
     WELCOME_CHANNEL_ID = int(os.getenv('WELCOME_CHANNEL_ID', 0))
     WORK_LOG_CHANNEL_ID = int(os.getenv('WORK_LOG_CHANNEL_ID', 0))
-    AUTO_NOTICE_VC_ID = int(os.getenv('AUTO_NOTICE_VC_ID', 0))
     NOTICE_ROLE_ID = int(os.getenv('NOTICE_ROLE_ID', 0))
     ADMIN_USER_ID = int(os.getenv('ADMIN_USER_ID', 0))
     RECRUIT_CHANNEL_ID = int(os.getenv('RECRUIT_CHANNEL_ID', 0))
-    ADMIN_ROLE_ID = int(os.getenv('ADMIN_ROLE_ID', 0)) # 追加
+    ADMIN_ROLE_ID = int(os.getenv('ADMIN_ROLE_ID', 0))
 
     # --- 状態を保存するファイル名 ---
     LAST_REMINDED_BUMP_ID_FILE = 'data/last_reminded_id.txt'
@@ -43,7 +42,7 @@ def main():
     # --- グローバル変数 ---
     active_sessions = {}
 
-    # --- ヘルパー関数 ---
+    # --- ヘルパー関数：時間フォーマット ---
     def format_duration(total_seconds):
         if total_seconds is None or total_seconds < 0:
             total_seconds = 0
@@ -51,7 +50,38 @@ def main():
         minutes, seconds = divmod(remainder, 60)
         return f"{int(hours)}時間 {int(minutes)}分 {int(seconds)}秒"
 
-    # --- Discord Botのクライアント設定 ---
+    # --- UI部品：永続的な募集ボタン ---
+    class RecruitmentView(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=None)
+
+        @discord.ui.button(label="作業仲間を募集！", style=discord.ButtonStyle.green, emoji="📢", custom_id="recruit_button")
+        async def recruit_button_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+            user = interaction.user
+
+            if not user.voice or not user.voice.channel:
+                await interaction.response.send_message("ボイスチャンネルに参加してからボタンを押してね。", ephemeral=True, delete_after=10)
+                return
+
+            try:
+                voice_channel = user.voice.channel
+                invite = await voice_channel.create_invite(max_age=7200, max_uses=0, reason=f"{user.display_name}による募集")
+
+                recruit_channel = client.get_channel(RECRUIT_CHANNEL_ID)
+                notice_role = interaction.guild.get_role(NOTICE_ROLE_ID)
+
+                if recruit_channel and notice_role:
+                    message_text = f"{notice_role.mention}\n{user.display_name} さんが作業通話を募集しているよ！みんなで作業しよう！\n{invite.url}"
+                    await recruit_channel.send(message_text)
+                    await interaction.response.send_message("募集を投稿したよ！", ephemeral=True, delete_after=5)
+                    logging.info(f"Sent a recruitment call for {user.display_name} to {voice_channel.name}.")
+                else:
+                    await interaction.response.send_message("エラー: 募集チャンネルまたは通知ロールが見つかりません。", ephemeral=True)
+            except Exception as e:
+                logging.error(f"Failed to process recruitment button click: {e}")
+                await interaction.response.send_message("エラーが発生しました。管理者に連絡してください。", ephemeral=True)
+
+    # --- Botクライアントの定義 ---
     intents = discord.Intents.default()
     intents.voice_states = True
     intents.guilds = True
@@ -68,6 +98,8 @@ def main():
             self.loop_counter = 0
 
         async def setup_hook(self):
+            self.add_view(RecruitmentView())
+            
             try:
                 if DATABASE_URL:
                     self.db_pool = await asyncpg.create_pool(dsn=DATABASE_URL, min_size=1, max_size=10)
@@ -103,7 +135,7 @@ def main():
 
     # --- バックグラウンド処理 ---
     async def do_periodic_role_check():
-        pass
+        pass # 機能削除済み
 
     async def do_bump_reminder_check():
         try:
@@ -152,7 +184,7 @@ def main():
         await client.wait_until_ready()
         logging.info("Client is ready, unified background loop will start.")
 
-    # --- イベントハンドラとコマンド ---
+    # --- イベント：Bot起動時 ---
     @client.event
     async def on_ready():
         logging.info(f'Logged in as {client.user} (ID: {client.user.id})')
@@ -160,41 +192,34 @@ def main():
         if not os.path.exists('data'):
             os.makedirs('data')
 
+    # --- イベント：メッセージ受信時 ---
     @client.event
     async def on_message(message):
         if message.author == client.user: return
         if message.author.bot and message.author.id != 302050872383242240: return
         
+        # Bump成功メッセージの検知 (ログ出力のみ)
         if message.channel.id == BUMP_CHANNEL_ID and message.author.id == 302050872383242240:
             if "表示順をアップしたよ" in message.content:
                 logging.info(f"Bump success message detected.")
 
+    # --- イベント：リアクション追加時 ---
     @client.event
     async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
-        # リアクションが自己紹介チャンネルでなければ無視
-        if payload.channel_id != INTRO_CHANNEL_ID:
-            return
-        # リアクションが「👌」でなければ無視
-        if str(payload.emoji) != '👌':
-            return
-        # リアクションしたのがBotなら無視
-        if payload.member.bot:
-            return
+        # 条件チェック
+        if payload.channel_id != INTRO_CHANNEL_ID: return
+        if str(payload.emoji) != '👌': return
+        if not payload.member or payload.member.bot: return
 
-        # --- ここからが修正点 ---
-        # リアクションした人が「君」または「管理者ロール持ち」かチェック
+        # 権限チェック
         reactor = payload.member
         admin_role = reactor.guild.get_role(ADMIN_ROLE_ID)
-        
         is_admin_user = (reactor.id == ADMIN_USER_ID)
         has_admin_role = (admin_role is not None and admin_role in reactor.roles)
-
-        # 上記のどちらでもなければ、処理を中断
-        if not (is_admin_user or has_admin_role):
-            return
-        # --- ここまでが修正点 ---
+        if not (is_admin_user or has_admin_role): return
         
         try:
+            # ロール付与処理
             channel = client.get_channel(payload.channel_id)
             if not channel: return
             message = await channel.fetch_message(payload.message_id)
@@ -225,58 +250,49 @@ def main():
         except Exception as e:
             logging.error(f"Error in on_raw_reaction_add: {e}", exc_info=True)
 
+    # --- イベント：ボイスチャンネル状態更新時 ---
     @client.event
     async def on_voice_state_update(member, before, after):
-        if member.bot: return
-        now = datetime.now(timezone.utc)
-        if after.channel and after.channel.id in TARGET_VC_IDS and (not before.channel or before.channel.id not in TARGET_VC_IDS):
-            active_sessions[member.id] = now
-            logging.info(f"{member.display_name} joined target VC {after.channel.name}. Session started.")
-        elif before.channel and before.channel.id in TARGET_VC_IDS and (not after.channel or after.channel.id not in TARGET_VC_IDS):
-            if member.id in active_sessions:
-                join_time = active_sessions.pop(member.id)
-                duration = (now - join_time).total_seconds()
-                total_seconds_after_update = 0
+        # 作業時間記録
+        if not member.bot:
+            now = datetime.now(timezone.utc)
+            if after.channel and after.channel.id in TARGET_VC_IDS and (not before.channel or before.channel.id not in TARGET_VC_IDS):
+                active_sessions[member.id] = now
+                logging.info(f"{member.display_name} joined target VC {after.channel.name}. Session started.")
+            elif before.channel and before.channel.id in TARGET_VC_IDS and (not after.channel or after.channel.id not in TARGET_VC_IDS):
+                if member.id in active_sessions:
+                    join_time = active_sessions.pop(member.id)
+                    duration = (now - join_time).total_seconds()
+                    total_seconds_after_update = 0
 
-                if client.db_pool:
-                    async with client.db_pool.acquire() as connection:
-                        await connection.execute('''
-                            INSERT INTO work_logs (user_id, total_seconds) VALUES ($1, $2)
-                            ON CONFLICT (user_id) DO UPDATE
-                            SET total_seconds = work_logs.total_seconds + $2
-                        ''', member.id, duration)
-                        
-                        record = await connection.fetchrow('SELECT total_seconds FROM work_logs WHERE user_id = $1', member.id)
-                        if record:
-                            total_seconds_after_update = record['total_seconds']
+                    if client.db_pool:
+                        async with client.db_pool.acquire() as connection:
+                            await connection.execute('''
+                                INSERT INTO work_logs (user_id, total_seconds) VALUES ($1, $2)
+                                ON CONFLICT (user_id) DO UPDATE
+                                SET total_seconds = work_logs.total_seconds + $2
+                            ''', member.id, duration)
+                            
+                            record = await connection.fetchrow('SELECT total_seconds FROM work_logs WHERE user_id = $1', member.id)
+                            if record:
+                                total_seconds_after_update = record['total_seconds']
 
-                formatted_duration = format_duration(duration)
-                formatted_total_duration = format_duration(total_seconds_after_update)
-                
-                logging.info(f"{member.display_name} left target VC {before.channel.name}. Session duration: {formatted_duration}. New total: {formatted_total_duration}")
-                
-                log_channel = client.get_channel(WORK_LOG_CHANNEL_ID)
-                if log_channel:
-                    message_to_send = (
-                        f"{member.mention}\n"
-                        f"お疲れ様、{member.display_name}！\n"
-                        f"今回の作業時間は **{formatted_duration}** だったよ。\n"
-                        f"累計作業時間は **{formatted_total_duration}** だよ。"
-                    )
-                    await log_channel.send(message_to_send)
+                    formatted_duration = format_duration(duration)
+                    formatted_total_duration = format_duration(total_seconds_after_update)
                     
-        if after.channel and after.channel.id == AUTO_NOTICE_VC_ID:
-            if len(after.channel.members) == 1 and (not before.channel or before.channel.id != AUTO_NOTICE_VC_ID):
-                recruit_channel = client.get_channel(RECRUIT_CHANNEL_ID)
-                notice_role = member.guild.get_role(NOTICE_ROLE_ID)
-                if recruit_channel and notice_role:
-                    message_text = f"{notice_role.mention}\n{member.display_name} さんが作業通話を募集しているよ！みんなで作業しよう！"
-                    try:
-                        await recruit_channel.send(message_text)
-                        logging.info(f"Sent a recruitment call for {member.display_name}.")
-                    except Exception as e:
-                        logging.error(f"Failed to send recruitment call: {e}")
+                    log_channel = client.get_channel(WORK_LOG_CHANNEL_ID)
+                    if log_channel:
+                        message_to_send = (
+                            f"{member.mention}\n"
+                            f"お疲れ様、{member.display_name}！\n"
+                            f"今回の作業時間は **{formatted_duration}** だったよ。\n"
+                            f"累計作業時間は **{formatted_total_duration}** だよ。"
+                        )
+                        await log_channel.send(message_to_send)
 
+    # --- スラッシュコマンド群 ---
+    
+    # /worktime コマンド
     @client.tree.command(name="worktime", description="指定したメンバーの累計作業時間を表示します。")
     async def worktime(interaction: discord.Interaction, member: discord.Member):
         if not client.db_pool:
@@ -296,6 +312,7 @@ def main():
         formatted_time = format_duration(total_seconds)
         await interaction.followup.send(f"{member.display_name} さんの累計作業時間は **{formatted_time}** です。")
 
+    # /announce コマンド
     @client.tree.command(name="announce", description="指定したチャンネルにBotからお知らせを投稿します。(管理者限定)")
     @app_commands.describe(channel="投稿先のチャンネル")
     @app_commands.checks.has_permissions(administrator=True)
@@ -316,13 +333,32 @@ def main():
         else:
             await interaction.response.send_message(f"コマンドの実行中にエラーが発生しました: {error}", ephemeral=True)
     
+    # /setup_recruit コマンド
+    @client.tree.command(name="setup_recruit", description="作業募集用のパネルを設置します。(管理者限定)")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def setup_recruit(interaction: discord.Interaction):
+        embed = discord.Embed(
+            title="📢 作業仲間募集パネル",
+            description="下のボタンを押すと、今いるボイスチャンネルへの招待リンク付きで募集が投稿されるよ！",
+            color=discord.Color.green()
+        )
+        await interaction.channel.send(embed=embed, view=RecruitmentView())
+        await interaction.response.send_message("募集パネルを設置しました。", ephemeral=True)
+
+    @setup_recruit.error
+    async def setup_recruit_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.errors.MissingPermissions):
+            await interaction.response.send_message("このコマンドは管理者しか使えないよ。", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"コマンドの実行中にエラーが発生しました: {error}", ephemeral=True)
+
     # Botを起動
     if TOKEN:
         client.run(TOKEN, reconnect=True)
     else:
         logging.error("DISCORD_BOT_TOKEN not found.")
 
-# --- メインの実行ブロック ---
+# --- メイン実行ブロック ---
 if __name__ == "__main__":
     RECONNECT_DELAY = 300
     while True:
