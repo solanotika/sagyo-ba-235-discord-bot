@@ -37,6 +37,9 @@ def main():
     RECRUIT_CHANNEL_ID = int(os.getenv('RECRUIT_CHANNEL_ID', 0))
     ADMIN_ROLE_ID = int(os.getenv('ADMIN_ROLE_ID', 0))
 
+    # --- 状態を保存するファイル名 ---
+    LAST_REMINDED_BUMP_ID_FILE = 'data/last_reminded_id.txt'
+
     # --- グローバル変数 ---
     active_sessions = {}
 
@@ -91,6 +94,7 @@ def main():
             super().__init__(intents=intents)
             self.tree = app_commands.CommandTree(self)
             self.db_pool = None
+            self.loop_counter = 0
 
         async def setup_hook(self):
             self.add_view(RecruitmentView())
@@ -112,31 +116,31 @@ def main():
                 self.db_pool = None
                 logging.error(f"Failed to connect to the database: {e}")
             
-            # --- ここからが修正点 ---
             if GUILD_ID:
                 guild_obj = discord.Object(id=int(GUILD_ID))
-                # サーバーの古いコマンドをクリア
                 self.tree.clear_commands(guild=guild_obj)
-                # グローバルコマンドをサーバーにコピー
                 self.tree.copy_global_to(guild=guild_obj)
-                # サーバーにコマンドを即時同期
                 await self.tree.sync(guild=guild_obj)
                 logging.info(f"Commands synced to guild {GUILD_ID}.")
             else:
-                # グローバルに同期
                 await self.tree.sync()
                 logging.info("Commands synced globally.")
-            # --- ここまでが修正点 ---
-        
+
+            if not unified_background_loop.is_running():
+                unified_background_loop.start()
+
         async def close(self):
+            if unified_background_loop.is_running():
+                unified_background_loop.cancel()
             if self.db_pool:
                 await self.db_pool.close()
             await super().close()
 
     client = MyClient(intents=intents)
-
- # --- バックグラウンド処理 ---
+    
+    # --- バックグラウンド処理 ---
     async def do_periodic_role_check():
+        # この機能は以前の修正で削除されたため、処理は空のままです。
         pass
 
     async def do_bump_reminder_check():
@@ -189,7 +193,19 @@ def main():
     # --- イベントハンドラとコマンド ---
     @client.event
     async def on_ready():
-        logging.info(f'Logged in as {client.user}')
+        logging.info(f'Logged in as {client.user} (ID: {client.user.id})')
+        logging.info(f'Connected to {len(client.guilds)} guilds.')
+        if not os.path.exists('data'):
+            os.makedirs('data')
+
+    @client.event
+    async def on_message(message):
+        if message.author == client.user: return
+        if message.author.bot and message.author.id != 302050872383242240: return
+        
+        if message.channel.id == BUMP_CHANNEL_ID and message.author.id == 302050872383242240:
+            if "表示順をアップしたよ" in message.content:
+                logging.info(f"Bump success message detected.")
 
     @client.event
     async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
