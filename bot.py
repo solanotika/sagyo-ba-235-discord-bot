@@ -134,7 +134,58 @@ def main():
             await super().close()
 
     client = MyClient(intents=intents)
-    
+
+ # --- バックグラウンド処理 ---
+    async def do_periodic_role_check():
+        pass
+
+    async def do_bump_reminder_check():
+        try:
+            bump_channel = client.get_channel(BUMP_CHANNEL_ID)
+            if not bump_channel: return
+
+            last_disboard_message = None
+            disboard_bot_id = 302050872383242240
+            async for message in bump_channel.history(limit=100):
+                if message.author.id == disboard_bot_id:
+                    last_disboard_message = message
+                    break
+
+            if not last_disboard_message: return
+
+            last_reminded_id = 0
+            if os.path.exists(LAST_REMINDED_BUMP_ID_FILE):
+                with open(LAST_REMINDED_BUMP_ID_FILE, 'r') as f:
+                    content = f.read().strip()
+                    if content.isdigit():
+                        last_reminded_id = int(content)
+
+            if last_disboard_message.id == last_reminded_id: return
+
+            two_hours_after_disboard_message = last_disboard_message.created_at + timedelta(hours=2)
+            if datetime.now(timezone.utc) >= two_hours_after_disboard_message:
+                await bump_channel.send("みんな、DISBOARDの **/bump** の時間だよ！\nサーバーの表示順を上げて、新しい仲間を増やそう！")
+                with open(LAST_REMINDED_BUMP_ID_FILE, 'w') as f:
+                    f.write(str(last_disboard_message.id))
+        except Exception as e:
+            logging.error(f"Error in check_bump_reminder: {e}", exc_info=True)
+
+    @tasks.loop(minutes=15)
+    async def unified_background_loop():
+        if not client.is_ready():
+            return
+
+        client.loop_counter += 1
+        logging.info(f"--- Running unified background loop (Cycle: {client.loop_counter}) ---")
+        await do_bump_reminder_check()
+        if client.loop_counter % 8 == 0:
+            await do_periodic_role_check()
+
+    @unified_background_loop.before_loop
+    async def before_unified_background_loop():
+        await client.wait_until_ready()
+        logging.info("Client is ready, unified background loop will start.")
+
     # --- イベントハンドラとコマンド ---
     @client.event
     async def on_ready():
