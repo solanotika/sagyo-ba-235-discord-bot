@@ -102,7 +102,6 @@ def main():
 
     # --- バックグラウンド処理 ---
     async def do_periodic_role_check():
-        # ② 自己紹介チャンネルの履歴を遡ってロールを付与する機能を削除
         pass
 
     async def do_bump_reminder_check():
@@ -165,11 +164,9 @@ def main():
         if message.author == client.user: return
         if message.author.bot and message.author.id != 302050872383242240: return
         
-        # ③ ユーザー別の/bump実行回数カウント機能を削除
         if message.channel.id == BUMP_CHANNEL_ID and message.author.id == 302050872383242240:
             if "表示順をアップしたよ" in message.content:
                 logging.info(f"Bump success message detected.")
-
 
     @client.event
     async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
@@ -187,8 +184,6 @@ def main():
             author_member = message.author
 
             if not isinstance(author_member, discord.Member):
-                # メンバーでない場合（サーバーから退出済みなど）
-                # ギルドオブジェクトからメンバーを再取得してみる
                 guild = client.get_guild(payload.guild_id)
                 if not guild: return
                 author_member = await guild.fetch_member(author_member.id)
@@ -197,8 +192,6 @@ def main():
             intro_role = message.guild.get_role(INTRO_ROLE_ID)
 
             if intro_role and intro_role not in author_member.roles:
-                # payload.member はリアクションを押したメンバーオブジェクト
-                # 権限チェックのために guild.me を使う
                 admin_member = message.guild.get_member(payload.user_id)
                 if not admin_member: 
                     admin_member = await message.guild.fetch_member(payload.user_id)
@@ -208,7 +201,12 @@ def main():
 
                 welcome_channel = client.get_channel(WELCOME_CHANNEL_ID)
                 if welcome_channel:
-                    await welcome_channel.send(f"🎉{author_member.mention}さん、ようこそ「作業場235」へ！VCが開放されたよ、自由に使ってね！ (管理人承認済み)")
+                    # --- ここが修正点 ---
+                    message_to_send = (
+                        f"{author_member.mention}\n"
+                        f"🎉{author_member.display_name}さん、ようこそ「作業場235」へ！VCが開放されたよ、自由に使ってね！"
+                    )
+                    await welcome_channel.send(message_to_send)
             else:
                 logging.info(f"{author_member.display_name} already has the role or role not found.")
 
@@ -237,13 +235,13 @@ def main():
                 logging.info(f"{member.display_name} left target VC {before.channel.name}. Session duration: {formatted_duration}")
                 log_channel = client.get_channel(WORK_LOG_CHANNEL_ID)
                 if log_channel:
-                    await log_channel.send(f"お疲れ様、{member.mention}！今回の作業時間は **{formatted_duration}** だったよ。")
+                    await log_channel.send(f"お疲れ様、{member.display_name}！今回の作業時間は **{formatted_duration}** だったよ。")
         if after.channel and after.channel.id == AUTO_NOTICE_VC_ID:
             if len(after.channel.members) == 1 and (not before.channel or before.channel.id != AUTO_NOTICE_VC_ID):
                 recruit_channel = client.get_channel(RECRUIT_CHANNEL_ID)
                 notice_role = member.guild.get_role(NOTICE_ROLE_ID)
                 if recruit_channel and notice_role:
-                    message_text = f"{notice_role.mention}\n{member.mention} さんが作業通話を募集しているよ！みんなで作業しよう！"
+                    message_text = f"{notice_role.mention}\n{member.display_name} さんが作業通話を募集しているよ！みんなで作業しよう！"
                     try:
                         await recruit_channel.send(message_text)
                         logging.info(f"Sent a recruitment call for {member.display_name}.")
@@ -267,13 +265,12 @@ def main():
             current_session_duration = (datetime.now(timezone.utc) - join_time).total_seconds()
             total_seconds += current_session_duration
         formatted_time = format_duration(total_seconds)
-        await interaction.followup.send(f"{member.mention} さんの累計作業時間は **{formatted_time}** です。")
+        await interaction.followup.send(f"{member.display_name} さんの累計作業時間は **{formatted_time}** です。")
 
     @client.tree.command(name="announce", description="指定したチャンネルにBotからお知らせを投稿します。(管理者限定)")
     @app_commands.describe(channel="投稿先のチャンネル")
     @app_commands.checks.has_permissions(administrator=True)
     async def announce(interaction: discord.Interaction, channel: discord.TextChannel):
-        # ① アナウンス用メッセージの内容を変更
         announcement_text = "★お知らせ用メッセージ入力欄★"
         try:
             await channel.send(announcement_text)
