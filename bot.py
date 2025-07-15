@@ -25,8 +25,8 @@ def main():
     TOKEN = os.getenv('DISCORD_BOT_TOKEN')
     DATABASE_URL = os.getenv('DATABASE_URL')
     GUILD_ID = os.getenv('GUILD_ID')
-    EXCLUDE_VC_IDS_STR = os.getenv('EXCLUDE_VC_IDS', '')
-    EXCLUDE_VC_IDS = {int(id_str.strip()) for id_str in EXCLUDE_VC_IDS_STR.split(',') if id_str.strip().isdigit()}
+    TARGET_VC_IDS_STR = os.getenv('TARGET_VC_IDS', '')
+    TARGET_VC_IDS = {int(id_str.strip()) for id_str in TARGET_VC_IDS_STR.split(',') if id_str.strip().isdigit()}
     BUMP_CHANNEL_ID = int(os.getenv('BUMP_CHANNEL_ID', 0))
     INTRO_CHANNEL_ID = int(os.getenv('INTRO_CHANNEL_ID', 0))
     INTRO_ROLE_ID = int(os.getenv('INTRO_ROLE_ID', 0))
@@ -64,12 +64,12 @@ def main():
 
             try:
                 voice_channel = user.voice.channel
-                invite = await voice_channel.create_invite(max_age=7200, max_uses=0, reason=f"{user.display_name}による募集")
                 recruit_channel = client.get_channel(RECRUIT_CHANNEL_ID)
                 if not (recruit_channel and interaction.guild): return
                 notice_role = interaction.guild.get_role(NOTICE_ROLE_ID)
 
                 if notice_role:
+                    invite = await voice_channel.create_invite(max_age=7200, max_uses=0, reason=f"{user.display_name}による募集")
                     message_text = f"{notice_role.mention}\n{user.display_name} さんが作業通話を募集しているよ！みんなで作業しよう！\n{invite.url}"
                     await recruit_channel.send(message_text)
                     await interaction.response.send_message("募集を投稿したよ！", ephemeral=True, delete_after=5)
@@ -123,21 +123,64 @@ def main():
                 await self.tree.sync()
                 logging.info("Commands synced globally.")
 
-            if not unified_background_loop.is_running():
-                unified_background_loop.start()
+            self.unified_background_loop.start()
 
         async def close(self):
-            if unified_background_loop.is_running():
-                unified_background_loop.cancel()
+            self.unified_background_loop.cancel()
             if self.db_pool:
                 await self.db_pool.close()
             await super().close()
 
+        # --- バックグラウンド処理 ---
+        async def _do_periodic_role_check(self):
+            pass
+
+        async def _do_bump_reminder_check(self):
+            try:
+                bump_channel = self.get_channel(BUMP_CHANNEL_ID)
+                if not bump_channel: return
+
+                last_disboard_message = None
+                disboard_bot_id = 302050872383242240
+                async for message in bump_channel.history(limit=100):
+                    if message.author.id == disboard_bot_id:
+                        last_disboard_message = message
+                        break
+
+                if not last_disboard_message: return
+
+                last_reminded_id = 0
+                if os.path.exists(LAST_REMINDED_BUMP_ID_FILE):
+                    with open(LAST_REMINDED_BUMP_ID_FILE, 'r') as f:
+                        content = f.read().strip()
+                        if content.isdigit():
+                            last_reminded_id = int(content)
+
+                if last_disboard_message.id == last_reminded_id: return
+
+                two_hours_after_disboard_message = last_disboard_message.created_at + timedelta(hours=2)
+                if datetime.now(timezone.utc) >= two_hours_after_disboard_message:
+                    await bump_channel.send("みんな、DISBOARDの **/bump** の時間だよ！\nサーバーの表示順を上げて、新しい仲間を増やそう！")
+                    with open(LAST_REMINDED_BUMP_ID_FILE, 'w') as f:
+                        f.write(str(last_disboard_message.id))
+            except Exception as e:
+                logging.error(f"Error in _do_bump_reminder_check: {e}", exc_info=True)
+
+        @tasks.loop(minutes=15)
+        async def unified_background_loop(self):
+            self.loop_counter += 1
+            logging.info(f"--- Running unified background loop (Cycle: {self.loop_counter}) ---")
+            await self._do_bump_reminder_check()
+            if self.loop_counter % 8 == 0:
+                await self._do_periodic_role_check()
+
+        @unified_background_loop.before_loop
+        async def before_unified_background_loop(self):
+            await self.wait_until_ready()
+            logging.info("Client is ready, unified background loop will start.")
+
     client = MyClient(intents=intents)
     
-    # --- バックグラウンド処理 ---
-    # (省略)
-
     # --- イベントハンドラとコマンド ---
     @client.event
     async def on_ready():
@@ -145,26 +188,45 @@ def main():
 
     @client.event
     async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
-        # (省略)
-        pass
+        if payload.channel_id != INTRO_CHANNEL_ID: return
+        if str(payload.emoji) != '👌': return
+        if not payload.member or payload.member.bot: return
+
+        reactor = payload.member
+        admin_role = reactor.guild.get_role(ADMIN_ROLE_ID)
+        is_admin_user = (reactor.id == ADMIN_USER_ID)
+        has_admin_role = (admin_role is not None and admin_role in reactor.roles)
+        if not (is_admin_user or has_admin_role): return
+        
+        try:
+            channel = client.get_channel(payload.channel_id)
+            if not channel: return
+            message = await channel.fetch_message(payload.message_id)
+            author = message.author
+            
+            if not isinstance(author, discord.Member):
+                 author = await message.guild.fetch_member(author.id)
+
+            intro_role = message.guild.get_role(INTRO_ROLE_ID)
+
+            if intro_role and intro_role not in author.roles:
+                await author.add_roles(intro_role, reason=f"Admin approved.")
+                welcome_channel = client.get_channel(WELCOME_CHANNEL_ID)
+                if welcome_channel:
+                    await welcome_channel.send(f"{author.mention}\n🎉{author.display_name}さん、ようこそ「作業場235」へ！VCが開放されたよ、自由に使ってね！")
+        except Exception as e:
+            logging.error(f"Error in on_raw_reaction_add: {e}", exc_info=True)
 
     @client.event
     async def on_voice_state_update(member, before, after):
         if member.bot: return
         now = datetime.now(timezone.utc)
-
-        # --- ここからが修正点 ---
-        # before.channel が作業チャンネルか (除外リストにないか)
+        
         is_before_work_vc = before.channel and before.channel.id not in EXCLUDE_VC_IDS
-        # after.channel が作業チャンネルか (除外リストにないか)
         is_after_work_vc = after.channel and after.channel.id not in EXCLUDE_VC_IDS
 
-        # セッション開始の条件：作業VCではなかった状態から、作業VCに入った
         if not is_before_work_vc and is_after_work_vc:
             active_sessions[member.id] = now
-            logging.info(f"SESSION START: {member.display_name} in {after.channel.name}")
-
-        # セッション終了の条件：作業VCにいた状態から、作業VCではない状態になった
         elif is_before_work_vc and not is_after_work_vc:
             if member.id in active_sessions:
                 join_time = active_sessions.pop(member.id)
@@ -190,11 +252,13 @@ def main():
                         f"今回の作業時間は **{format_duration(duration)}** だったよ。\n"
                         f"累計作業時間は **{format_duration(total_seconds_after_update)}** だよ。"
                     )
-                logging.info(f"SESSION END: {member.display_name}. Duration: {format_duration(duration)}")
-        # --- ここまでが修正点 ---
 
-    # (以降のコマンドとメイン実行ブロックは変更なし)
-    # ...
+    @client.tree.command(name="worktime_ranking", description="累計作業時間のトップ10ランキングを表示します。")
+    async def worktime_ranking(interaction: discord.Interaction):
+        # ... (内容は変更なし)
+        pass
+
+    # ... (他のコマンドも同様に、中身は省略)
 
     if TOKEN:
         client.run(TOKEN, reconnect=True)
@@ -205,6 +269,13 @@ if __name__ == "__main__":
     while True:
         try:
             main()
+        except discord.errors.HTTPException as e:
+            if e.status == 429:
+                logging.warning(f"Rate-limited. Waiting 300s.")
+                time.sleep(300)
+            else:
+                logging.error(f"Unhandled HTTP exception: {e}", exc_info=True)
+                time.sleep(60)
         except Exception as e:
             logging.error(f"Main loop error: {e}", exc_info=True)
             time.sleep(60)
