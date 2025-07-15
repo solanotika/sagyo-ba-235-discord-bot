@@ -9,7 +9,6 @@ import re
 import asyncio
 import time
 import asyncpg
-import google.generativeai as genai
 
 # --- ロギング設定 ---
 logging.basicConfig(level=logging.INFO)
@@ -201,48 +200,41 @@ def main():
 
     # --- 機能：メッセージ受信時の処理 ---
     @client.event
-async def on_message(message):
-    # 自分自身や他のBotのメッセージは基本的に無視 (DISBOARDは例外)
-    if message.author == client.user: return
-    if message.author.bot and message.author.id != 302050872383242240: return
-    
-    # --- AI応答機能 (診断モード) ---
-    if client.user.mentioned_in(message) and GEMINI_API_KEY:
-        logging.info("-> AI Handler: Mention detected.")
-
-        # ループ防止
-        if message.reference and message.reference.cached_message and message.reference.cached_message.author == client.user:
-            logging.info("-> AI Handler: Ignored mention because it's a reply to myself.")
-            return
-
-        # プロンプトをクリーニング
-        prompt = re.sub(r'<@!?(\d+)>', '', message.content).strip()
-        logging.info(f"-> AI Handler: Cleaned prompt is: '{prompt}'")
+    async def on_message(message):
+        if message.author == client.user: return
+        if message.author.bot and message.author.id != 302050872383242240: return
         
-        if not prompt:
-            logging.info("-> AI Handler: Prompt is empty after cleaning. Exiting.")
+        if client.user.mentioned_in(message) and GEMINI_API_KEY:
+            logging.info("-> AI Handler: Mention detected.")
+            if message.reference and message.reference.cached_message and message.reference.cached_message.author == client.user:
+                logging.info("-> AI Handler: Ignored mention because it's a reply to myself.")
+                return
+
+            prompt = re.sub(r'<@!?(\d+)>', '', message.content).strip()
+            logging.info(f"-> AI Handler: Cleaned prompt is: '{prompt}'")
+            
+            if not prompt:
+                logging.info("-> AI Handler: Prompt is empty after cleaning. Exiting.")
+                return
+
+            async with message.channel.typing():
+                try:
+                    logging.info("-> AI Handler: Generating content with Gemini API...")
+                    model = genai.GenerativeModel('gemini-1.5-flash')
+                    response = await model.generate_content_async(prompt)
+                    
+                    if len(response.text) > 2000:
+                        for i in range(0, len(response.text), 2000):
+                            await message.reply(response.text[i:i+2000])
+                    else:
+                        await message.reply(response.text)
+                    logging.info("-> AI Handler: Successfully sent reply.")
+
+                except Exception as e:
+                    logging.error(f"-> AI Handler: Gemini API Error: {e}")
+                    await message.reply("ごめん、AIモデルとの通信でエラーが起きちゃった。")
             return
 
-        async with message.channel.typing():
-            try:
-                logging.info("-> AI Handler: Generating content with Gemini API...")
-                model = genai.GenerativeModel('gemini-1.5-flash')
-                response = await model.generate_content_async(prompt)
-                
-                # 回答を送信
-                if len(response.text) > 2000:
-                    for i in range(0, len(response.text), 2000):
-                        await message.reply(response.text[i:i+2000])
-                else:
-                    await message.reply(response.text)
-                logging.info("-> AI Handler: Successfully sent reply.")
-
-            except Exception as e:
-                logging.error(f"-> AI Handler: Gemini API Error: {e}")
-                await message.reply("ごめん、AIモデルとの通信でエラーが起きちゃった。")
-        return
-
-        # Bump成功メッセージの検知
         if message.channel.id == BUMP_CHANNEL_ID and message.author.id == 302050872383242240:
             if "表示順をアップしたよ" in message.content:
                 logging.info(f"Bump success message detected.")
@@ -279,13 +271,12 @@ async def on_message(message):
         except Exception as e:
             logging.error(f"Error in on_raw_reaction_add: {e}", exc_info=True)
 
-    # --- 機能：VC状態更新時の処理 (作業時間記録 / 自動募集) ---
+    # --- 機能：VC状態更新時の処理 ---
     @client.event
     async def on_voice_state_update(member, before, after):
         if member.bot: return
         now = datetime.now(timezone.utc)
         
-        # 作業時間記録
         if after.channel and after.channel.id in TARGET_VC_IDS and (not before.channel or before.channel.id not in TARGET_VC_IDS):
             active_sessions[member.id] = now
         elif before.channel and before.channel.id in TARGET_VC_IDS and (not after.channel or after.channel.id not in TARGET_VC_IDS):
@@ -315,8 +306,6 @@ async def on_message(message):
                     )
 
     # --- スラッシュコマンド群 ---
-    
-    # コマンド：/worktime
     @client.tree.command(name="worktime", description="指定したメンバーの累計作業時間を表示します。")
     async def worktime(interaction: discord.Interaction, member: discord.Member):
         if not client.db_pool: return await interaction.response.send_message("DB未接続です。", ephemeral=True)
@@ -332,7 +321,6 @@ async def on_message(message):
             total_seconds += (datetime.now(timezone.utc) - join_time).total_seconds()
         await interaction.followup.send(f"{member.display_name} さんの累計作業時間は **{format_duration(total_seconds)}** です。")
 
-    # コマンド：/worktime_ranking
     @client.tree.command(name="worktime_ranking", description="累計作業時間のトップ10ランキングを表示します。")
     async def worktime_ranking(interaction: discord.Interaction):
         if not client.db_pool: return await interaction.response.send_message("DB未接続です。", ephemeral=True)
@@ -360,9 +348,7 @@ async def on_message(message):
             logging.error(f"Error in worktime_ranking: {e}", exc_info=True)
             await interaction.followup.send("ランキングの取得中にエラーが発生しました。")
 
-    # コマンド：/announce
     @client.tree.command(name="announce", description="指定したチャンネルにBotからお知らせを投稿します。(管理者限定)")
-    @app_commands.describe(channel="投稿先のチャンネル")
     @app_commands.checks.has_permissions(administrator=True)
     async def announce(interaction: discord.Interaction, channel: discord.TextChannel):
         await channel.send("★お知らせ用メッセージ入力欄★")
@@ -373,7 +359,6 @@ async def on_message(message):
         if isinstance(error, app_commands.errors.MissingPermissions):
             await interaction.response.send_message("このコマンドは管理者しか使えないよ。", ephemeral=True)
 
-    # コマンド：/setup_recruit
     @client.tree.command(name="setup_recruit", description="作業募集用のパネルを設置します。(管理者限定)")
     @app_commands.checks.has_permissions(administrator=True)
     async def setup_recruit(interaction: discord.Interaction):
