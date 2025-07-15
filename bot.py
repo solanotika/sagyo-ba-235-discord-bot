@@ -25,7 +25,6 @@ def main():
 
     TOKEN = os.getenv('DISCORD_BOT_TOKEN')
     DATABASE_URL = os.getenv('DATABASE_URL')
-    GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
     GUILD_ID = os.getenv('GUILD_ID')
     EXCLUDE_VC_IDS_STR = os.getenv('EXCLUDE_VC_IDS', '')
     EXCLUDE_VC_IDS = {int(id_str.strip()) for id_str in EXCLUDE_VC_IDS_STR.split(',') if id_str.strip().isdigit()}
@@ -113,14 +112,23 @@ def main():
             if self.db_pool: await self.db_pool.close()
             await super().close()
 
-        async def _do_periodic_role_check(self): pass
+        async def _do_periodic_role_check(self):
+            pass
 
         async def _do_bump_reminder_check(self):
             try:
                 bump_channel = self.get_channel(BUMP_CHANNEL_ID)
                 if not bump_channel: return
+                
+                # --- ここからが修正点 ---
+                last_disboard_message = None
                 disboard_bot_id = 302050872383242240
-                last_disboard_message = await bump_channel.history(limit=100).find(lambda m: m.author.id == disboard_bot_id)
+                async for message in bump_channel.history(limit=100):
+                    if message.author.id == disboard_bot_id:
+                        last_disboard_message = message
+                        break
+                # --- ここまでが修正点 ---
+
                 if not last_disboard_message: return
 
                 last_reminded_id = 0
@@ -138,6 +146,7 @@ def main():
 
         @tasks.loop(minutes=15)
         async def unified_background_loop(self):
+            if not self.is_ready(): return
             self.loop_counter += 1
             await self._do_bump_reminder_check()
             if self.loop_counter % 8 == 0: await self._do_periodic_role_check()
