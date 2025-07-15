@@ -9,13 +9,14 @@ import re
 import asyncio
 import time
 import asyncpg
+import google.generativeai as genai
 
 # --- ロギング設定 ---
 logging.basicConfig(level=logging.INFO)
 
-# --- main関数 ---
+# --- main関数を定義 ---
 def main():
-    # --- 環境変数と定数の定義 ---
+    # --- 環境変数からIDを取得 ---
     try:
         from dotenv import load_dotenv
         load_dotenv()
@@ -44,7 +45,6 @@ def main():
     LAST_REMINDED_BUMP_ID_FILE = 'data/last_reminded_id.txt'
     active_sessions = {}
 
-    # --- ヘルパー関数：時間フォーマット ---
     def format_duration(total_seconds):
         if total_seconds is None or total_seconds < 0:
             total_seconds = 0
@@ -52,7 +52,6 @@ def main():
         minutes, seconds = divmod(remainder, 60)
         return f"{int(hours)}時間 {int(minutes)}分 {int(seconds)}秒"
 
-    # --- UI部品：永続的な募集ボタン ---
     class RecruitmentView(discord.ui.View):
         def __init__(self):
             super().__init__(timeout=None)
@@ -81,7 +80,6 @@ def main():
                 logging.error(f"Failed to process recruitment button click: {e}")
                 await interaction.response.send_message("エラーが発生しました。管理者に連絡してください。", ephemeral=True)
 
-    # --- Botクライアントの定義 ---
     intents = discord.Intents.default()
     intents.voice_states = True
     intents.guilds = True
@@ -139,7 +137,6 @@ def main():
 
     client = MyClient(intents=intents)
     
-    # --- バックグラウンド処理 ---
     async def do_periodic_role_check():
         pass
 
@@ -178,7 +175,6 @@ def main():
     async def unified_background_loop():
         if not client.is_ready():
             return
-
         client.loop_counter += 1
         logging.info(f"--- Running unified background loop (Cycle: {client.loop_counter}) ---")
         await do_bump_reminder_check()
@@ -190,7 +186,6 @@ def main():
         await client.wait_until_ready()
         logging.info("Client is ready, unified background loop will start.")
 
-    # --- 機能：Bot起動時の処理 ---
     @client.event
     async def on_ready():
         logging.info(f'Logged in as {client.user} (ID: {client.user.id})')
@@ -198,64 +193,37 @@ def main():
         if not os.path.exists('data'):
             os.makedirs('data')
 
-    # --- 機能：メッセージ受信時の処理 ---
-    @client.event
     @client.event
     async def on_message(message):
-        # 自分自身や他のBotのメッセージは基本的に無視 (DISBOARDは例外)
         if message.author == client.user: return
         if message.author.bot and message.author.id != 302050872383242240: return
         
-        # --- AI応答機能 (診断モード) ---
-        # メンションが含まれているかどうかのチェック
-        is_mentioned = client.user.mentioned_in(message)
-        logging.info(f"-> AI Handler: Message received. Is mentioned? {is_mentioned}")
-
-        # APIキーが存在するかのチェック
-        has_api_key = bool(GEMINI_API_KEY)
-        logging.info(f"-> AI Handler: Gemini API Key found? {has_api_key}")
-
-        if is_mentioned and has_api_key:
-            logging.info("-> AI Handler: Conditions met, proceeding with AI response.")
-
-            # ループ防止
+        if client.user.mentioned_in(message) and GEMINI_API_KEY:
             if message.reference and message.reference.cached_message and message.reference.cached_message.author == client.user:
-                logging.info("-> AI Handler: Ignored mention because it's a reply to myself.")
-                return
-
-            # プロンプトをクリーニング
-            prompt = re.sub(r'<@!?(\d+)>', '', message.content).strip()
-            logging.info(f"-> AI Handler: Cleaned prompt is: '{prompt}'")
-            
-            if not prompt:
-                logging.info("-> AI Handler: Prompt is empty after cleaning. Exiting.")
                 return
 
             async with message.channel.typing():
+                prompt = re.sub(r'<@!?(\d+)>', '', message.content).strip()
+                if not prompt: return
+
                 try:
-                    logging.info("-> AI Handler: Generating content with Gemini API...")
                     model = genai.GenerativeModel('gemini-1.5-flash')
                     response = await model.generate_content_async(prompt)
                     
-                    # 回答を送信
                     if len(response.text) > 2000:
                         for i in range(0, len(response.text), 2000):
                             await message.reply(response.text[i:i+2000])
                     else:
                         await message.reply(response.text)
-                    logging.info("-> AI Handler: Successfully sent reply.")
-
                 except Exception as e:
-                    logging.error(f"-> AI Handler: Gemini API Error: {e}")
+                    logging.error(f"Gemini API Error: {e}")
                     await message.reply("ごめん、AIモデルとの通信でエラーが起きちゃった。")
             return
 
-        # --- Bump成功メッセージの検知 ---
         if message.channel.id == BUMP_CHANNEL_ID and message.author.id == 302050872383242240:
             if "表示順をアップしたよ" in message.content:
                 logging.info(f"Bump success message detected.")
 
-    # --- 機能：リアクション追加によるロール付与 ---
     @client.event
     async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         if payload.channel_id != INTRO_CHANNEL_ID: return
@@ -287,7 +255,6 @@ def main():
         except Exception as e:
             logging.error(f"Error in on_raw_reaction_add: {e}", exc_info=True)
 
-    # --- 機能：VC状態更新時の処理 ---
     @client.event
     async def on_voice_state_update(member, before, after):
         if member.bot: return
@@ -321,7 +288,6 @@ def main():
                         f"累計作業時間は **{format_duration(total_seconds_after_update)}** だよ。"
                     )
 
-    # --- スラッシュコマンド群 ---
     @client.tree.command(name="worktime", description="指定したメンバーの累計作業時間を表示します。")
     async def worktime(interaction: discord.Interaction, member: discord.Member):
         if not client.db_pool: return await interaction.response.send_message("DB未接続です。", ephemeral=True)
@@ -370,11 +336,6 @@ def main():
         await channel.send("★お知らせ用メッセージ入力欄★")
         await interaction.response.send_message(f"{channel.mention} にお知らせを投稿しました。", ephemeral=True)
 
-    @announce.error
-    async def announce_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-        if isinstance(error, app_commands.errors.MissingPermissions):
-            await interaction.response.send_message("このコマンドは管理者しか使えないよ。", ephemeral=True)
-
     @client.tree.command(name="setup_recruit", description="作業募集用のパネルを設置します。(管理者限定)")
     @app_commands.checks.has_permissions(administrator=True)
     async def setup_recruit(interaction: discord.Interaction):
@@ -382,18 +343,11 @@ def main():
         await interaction.channel.send(embed=embed, view=RecruitmentView())
         await interaction.response.send_message("募集パネルを設置しました。", ephemeral=True)
 
-    @setup_recruit.error
-    async def setup_recruit_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-        if isinstance(error, app_commands.errors.MissingPermissions):
-            await interaction.response.send_message("このコマンドは管理者しか使えないよ。", ephemeral=True)
-
-    # Botの実行
     if TOKEN:
         client.run(TOKEN, reconnect=True)
     else:
         logging.error("TOKEN not found.")
 
-# --- メイン実行ブロック ---
 if __name__ == "__main__":
     while True:
         try:
