@@ -39,8 +39,19 @@ def main():
     RECRUIT_CHANNEL_ID = int(os.getenv('RECRUIT_CHANNEL_ID', 0))
     ADMIN_ROLE_ID = int(os.getenv('ADMIN_ROLE_ID', 0))
 
+    # --- ここからが修正点 ---
+    # AIモデルの設定をmain関数内で行う
+    gemini_model = None
     if GEMINI_API_KEY:
-        genai.configure(api_key=GEMINI_API_KEY)
+        try:
+            genai.configure(api_key=GEMINI_API_KEY)
+            gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+            logging.info("Gemini model configured successfully.")
+        except Exception as e:
+            logging.error(f"Failed to configure Gemini model: {e}")
+    else:
+        logging.warning("GEMINI_API_KEY not found. AI features will be disabled.")
+    # --- ここまでが修正点 ---
 
     LAST_REMINDED_BUMP_ID_FILE = 'data/last_reminded_id.txt'
     active_sessions = {}
@@ -198,7 +209,7 @@ def main():
         if message.author == client.user: return
         if message.author.bot and message.author.id != 302050872383242240: return
         
-        if client.user.mentioned_in(message) and GEMINI_API_KEY:
+        if client.user.mentioned_in(message) and gemini_model:
             if message.reference and message.reference.cached_message and message.reference.cached_message.author == client.user:
                 return
 
@@ -207,8 +218,7 @@ def main():
                 if not prompt: return
 
                 try:
-                    model = genai.GenerativeModel('gemini-1.5-flash')
-                    response = await model.generate_content_async(prompt)
+                    response = await gemini_model.generate_content_async(prompt)
                     
                     if len(response.text) > 2000:
                         for i in range(0, len(response.text), 2000):
