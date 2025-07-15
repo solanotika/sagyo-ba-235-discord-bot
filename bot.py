@@ -25,8 +25,8 @@ def main():
     TOKEN = os.getenv('DISCORD_BOT_TOKEN')
     DATABASE_URL = os.getenv('DATABASE_URL')
     GUILD_ID = os.getenv('GUILD_ID')
-    TARGET_VC_IDS_STR = os.getenv('TARGET_VC_IDS', '')
-    TARGET_VC_IDS = {int(id_str.strip()) for id_str in TARGET_VC_IDS_STR.split(',') if id_str.strip().isdigit()}
+    EXCLUDE_VC_IDS_STR = os.getenv('EXCLUDE_VC_IDS', '')
+    EXCLUDE_VC_IDS = {int(id_str.strip()) for id_str in EXCLUDE_VC_IDS_STR.split(',') if id_str.strip().isdigit()}
     BUMP_CHANNEL_ID = int(os.getenv('BUMP_CHANNEL_ID', 0))
     INTRO_CHANNEL_ID = int(os.getenv('INTRO_CHANNEL_ID', 0))
     INTRO_ROLE_ID = int(os.getenv('INTRO_ROLE_ID', 0))
@@ -36,6 +36,9 @@ def main():
     ADMIN_USER_ID = int(os.getenv('ADMIN_USER_ID', 0))
     RECRUIT_CHANNEL_ID = int(os.getenv('RECRUIT_CHANNEL_ID', 0))
     ADMIN_ROLE_ID = int(os.getenv('ADMIN_ROLE_ID', 0))
+
+    # --- 状態を保存するファイル名 ---
+    LAST_REMINDED_BUMP_ID_FILE = 'data/last_reminded_id.txt'
 
     # --- グローバル変数 ---
     active_sessions = {}
@@ -91,7 +94,6 @@ def main():
             super().__init__(intents=intents)
             self.tree = app_commands.CommandTree(self)
             self.db_pool = None
-            self.loop_counter = 0
 
         async def setup_hook(self):
             self.add_view(RecruitmentView())
@@ -122,7 +124,7 @@ def main():
             else:
                 await self.tree.sync()
                 logging.info("Commands synced globally.")
-
+            
             self.unified_background_loop.start()
 
         async def close(self):
@@ -168,7 +170,13 @@ def main():
 
         @tasks.loop(minutes=15)
         async def unified_background_loop(self):
-            self.loop_counter += 1
+            if not self.is_ready(): return
+
+            if hasattr(self, 'loop_counter'):
+                self.loop_counter += 1
+            else:
+                self.loop_counter = 1
+            
             logging.info(f"--- Running unified background loop (Cycle: {self.loop_counter}) ---")
             await self._do_bump_reminder_check()
             if self.loop_counter % 8 == 0:
@@ -227,6 +235,7 @@ def main():
 
         if not is_before_work_vc and is_after_work_vc:
             active_sessions[member.id] = now
+            logging.info(f"SESSION START: {member.display_name} in {after.channel.name}")
         elif is_before_work_vc and not is_after_work_vc:
             if member.id in active_sessions:
                 join_time = active_sessions.pop(member.id)
@@ -252,6 +261,7 @@ def main():
                         f"今回の作業時間は **{format_duration(duration)}** だったよ。\n"
                         f"累計作業時間は **{format_duration(total_seconds_after_update)}** だよ。"
                     )
+                logging.info(f"SESSION END: {member.display_name}. Duration: {format_duration(duration)}")
 
     @client.tree.command(name="worktime_ranking", description="累計作業時間のトップ10ランキングを表示します。")
     async def worktime_ranking(interaction: discord.Interaction):
