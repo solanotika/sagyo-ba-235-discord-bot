@@ -9,7 +9,6 @@ import re
 import asyncio
 import time
 import asyncpg
-import google.generativeai as genai
 
 # --- ロギング設定 ---
 logging.basicConfig(level=logging.INFO)
@@ -25,10 +24,11 @@ def main():
 
     TOKEN = os.getenv('DISCORD_BOT_TOKEN')
     DATABASE_URL = os.getenv('DATABASE_URL')
-    GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
     GUILD_ID = os.getenv('GUILD_ID')
-    TARGET_VC_IDS_STR = os.getenv('TARGET_VC_IDS', '')
-    TARGET_VC_IDS = {int(id_str.strip()) for id_str in TARGET_VC_IDS_STR.split(',') if id_str.strip().isdigit()}
+    # --- ここからが修正点 ---
+    EXCLUDE_VC_IDS_STR = os.getenv('EXCLUDE_VC_IDS', '')
+    EXCLUDE_VC_IDS = {int(id_str.strip()) for id_str in EXCLUDE_VC_IDS_STR.split(',') if id_str.strip().isdigit()}
+    # --- ここまでが修正点 ---
     BUMP_CHANNEL_ID = int(os.getenv('BUMP_CHANNEL_ID', 0))
     INTRO_CHANNEL_ID = int(os.getenv('INTRO_CHANNEL_ID', 0))
     INTRO_ROLE_ID = int(os.getenv('INTRO_ROLE_ID', 0))
@@ -39,23 +39,13 @@ def main():
     RECRUIT_CHANNEL_ID = int(os.getenv('RECRUIT_CHANNEL_ID', 0))
     ADMIN_ROLE_ID = int(os.getenv('ADMIN_ROLE_ID', 0))
 
-    # --- ここからが修正点 ---
-    # AIモデルの設定をmain関数内で行う
-    gemini_model = None
-    if GEMINI_API_KEY:
-        try:
-            genai.configure(api_key=GEMINI_API_KEY)
-            gemini_model = genai.GenerativeModel('gemini-1.5-flash')
-            logging.info("Gemini model configured successfully.")
-        except Exception as e:
-            logging.error(f"Failed to configure Gemini model: {e}")
-    else:
-        logging.warning("GEMINI_API_KEY not found. AI features will be disabled.")
-    # --- ここまでが修正点 ---
-
+    # --- 状態を保存するファイル名 ---
     LAST_REMINDED_BUMP_ID_FILE = 'data/last_reminded_id.txt'
+
+    # --- グローバル変数 ---
     active_sessions = {}
 
+    # --- ヘルパー関数 ---
     def format_duration(total_seconds):
         if total_seconds is None or total_seconds < 0:
             total_seconds = 0
@@ -63,6 +53,7 @@ def main():
         minutes, seconds = divmod(remainder, 60)
         return f"{int(hours)}時間 {int(minutes)}分 {int(seconds)}秒"
 
+    # --- UI部品：永続的な募集ボタン ---
     class RecruitmentView(discord.ui.View):
         def __init__(self):
             super().__init__(timeout=None)
@@ -91,6 +82,7 @@ def main():
                 logging.error(f"Failed to process recruitment button click: {e}")
                 await interaction.response.send_message("エラーが発生しました。管理者に連絡してください。", ephemeral=True)
 
+    # --- Botクライアントの定義 ---
     intents = discord.Intents.default()
     intents.voice_states = True
     intents.guilds = True
@@ -148,6 +140,7 @@ def main():
 
     client = MyClient(intents=intents)
     
+    # --- バックグラウンド処理 ---
     async def do_periodic_role_check():
         pass
 
@@ -197,6 +190,7 @@ def main():
         await client.wait_until_ready()
         logging.info("Client is ready, unified background loop will start.")
 
+    # --- イベントハンドラとコマンド ---
     @client.event
     async def on_ready():
         logging.info(f'Logged in as {client.user} (ID: {client.user.id})')
@@ -209,27 +203,6 @@ def main():
         if message.author == client.user: return
         if message.author.bot and message.author.id != 302050872383242240: return
         
-        if client.user.mentioned_in(message) and gemini_model:
-            if message.reference and message.reference.cached_message and message.reference.cached_message.author == client.user:
-                return
-
-            async with message.channel.typing():
-                prompt = re.sub(r'<@!?(\d+)>', '', message.content).strip()
-                if not prompt: return
-
-                try:
-                    response = await gemini_model.generate_content_async(prompt)
-                    
-                    if len(response.text) > 2000:
-                        for i in range(0, len(response.text), 2000):
-                            await message.reply(response.text[i:i+2000])
-                    else:
-                        await message.reply(response.text)
-                except Exception as e:
-                    logging.error(f"Gemini API Error: {e}")
-                    await message.reply("ごめん、AIモデルとの通信でエラーが起きちゃった。")
-            return
-
         if message.channel.id == BUMP_CHANNEL_ID and message.author.id == 302050872383242240:
             if "表示順をアップしたよ" in message.content:
                 logging.info(f"Bump success message detected.")
@@ -270,48 +243,43 @@ def main():
         if member.bot: return
         now = datetime.now(timezone.utc)
         
-        if after.channel and after.channel.id in TARGET_VC_IDS and (not before.channel or before.channel.id not in TARGET_VC_IDS):
-            active_sessions[member.id] = now
-        elif before.channel and before.channel.id in TARGET_VC_IDS and (not after.channel or after.channel.id not in TARGET_VC_IDS):
-            if member.id in active_sessions:
-                join_time = active_sessions.pop(member.id)
-                duration = (now - join_time).total_seconds()
-                total_seconds_after_update = 0
+        # --- ここからが修正点 ---
+        # 参加したチャンネルが除外リストになければ、セッションを開始
+        if after.channel and after.channel.id not in EXCLUDE_VC_IDS:
+            # 退出→別の作業VCへ移動した場合を考慮
+            if before.channel and before.channel.id in EXCLUDE_VC_IDS:
+                active_sessions[member.id] = now
+                logging.info(f"{member.display_name} joined work VC {after.channel.name}. Session started.")
 
-                if client.db_pool:
-                    async with client.db_pool.acquire() as connection:
-                        await connection.execute('''
-                            INSERT INTO work_logs (user_id, total_seconds) VALUES ($1, $2)
-                            ON CONFLICT (user_id) DO UPDATE
-                            SET total_seconds = work_logs.total_seconds + $2
-                        ''', member.id, duration)
-                        record = await connection.fetchrow('SELECT total_seconds FROM work_logs WHERE user_id = $1', member.id)
-                        if record:
-                            total_seconds_after_update = record['total_seconds']
-                
-                log_channel = client.get_channel(WORK_LOG_CHANNEL_ID)
-                if log_channel:
-                    await log_channel.send(
-                        f"{member.mention}\n"
-                        f"お疲れ様、{member.display_name}！\n"
-                        f"今回の作業時間は **{format_duration(duration)}** だったよ。\n"
-                        f"累計作業時間は **{format_duration(total_seconds_after_update)}** だよ。"
-                    )
+        # 除外リストにないチャンネルから退出した場合、セッションを終了
+        elif before.channel and before.channel.id not in EXCLUDE_VC_IDS:
+            # 作業VC→別の除外VCへ移動した場合を考慮
+            if not after.channel or after.channel.id in EXCLUDE_VC_IDS:
+                if member.id in active_sessions:
+                    join_time = active_sessions.pop(member.id)
+                    duration = (now - join_time).total_seconds()
+                    total_seconds_after_update = 0
 
-    @client.tree.command(name="worktime", description="指定したメンバーの累計作業時間を表示します。")
-    async def worktime(interaction: discord.Interaction, member: discord.Member):
-        if not client.db_pool: return await interaction.response.send_message("DB未接続です。", ephemeral=True)
-        await interaction.response.defer()
-        total_seconds = 0
-        if client.db_pool:
-            async with client.db_pool.acquire() as connection:
-                record = await connection.fetchrow('SELECT total_seconds FROM work_logs WHERE user_id = $1', member.id)
-                if record:
-                    total_seconds = record['total_seconds']
-        if member.id in active_sessions:
-            join_time = active_sessions[member.id]
-            total_seconds += (datetime.now(timezone.utc) - join_time).total_seconds()
-        await interaction.followup.send(f"{member.display_name} さんの累計作業時間は **{format_duration(total_seconds)}** です。")
+                    if client.db_pool:
+                        async with client.db_pool.acquire() as connection:
+                            await connection.execute('''
+                                INSERT INTO work_logs (user_id, total_seconds) VALUES ($1, $2)
+                                ON CONFLICT (user_id) DO UPDATE
+                                SET total_seconds = work_logs.total_seconds + $2
+                            ''', member.id, duration)
+                            record = await connection.fetchrow('SELECT total_seconds FROM work_logs WHERE user_id = $1', member.id)
+                            if record:
+                                total_seconds_after_update = record['total_seconds']
+                    
+                    log_channel = client.get_channel(WORK_LOG_CHANNEL_ID)
+                    if log_channel:
+                        await log_channel.send(
+                            f"{member.mention}\n"
+                            f"お疲れ様、{member.display_name}！\n"
+                            f"今回の作業時間は **{format_duration(duration)}** だったよ。\n"
+                            f"累計作業時間は **{format_duration(total_seconds_after_update)}** だよ。"
+                        )
+        # --- ここまでが修正点 ---
 
     @client.tree.command(name="worktime_ranking", description="累計作業時間のトップ10ランキングを表示します。")
     async def worktime_ranking(interaction: discord.Interaction):
@@ -339,6 +307,21 @@ def main():
         except Exception as e:
             logging.error(f"Error in worktime_ranking: {e}", exc_info=True)
             await interaction.followup.send("ランキングの取得中にエラーが発生しました。")
+
+    @client.tree.command(name="worktime", description="指定したメンバーの累計作業時間を表示します。")
+    async def worktime(interaction: discord.Interaction, member: discord.Member):
+        if not client.db_pool: return await interaction.response.send_message("DB未接続です。", ephemeral=True)
+        await interaction.response.defer()
+        total_seconds = 0
+        if client.db_pool:
+            async with client.db_pool.acquire() as connection:
+                record = await connection.fetchrow('SELECT total_seconds FROM work_logs WHERE user_id = $1', member.id)
+                if record:
+                    total_seconds = record['total_seconds']
+        if member.id in active_sessions:
+            join_time = active_sessions[member.id]
+            total_seconds += (datetime.now(timezone.utc) - join_time).total_seconds()
+        await interaction.followup.send(f"{member.display_name} さんの累計作業時間は **{format_duration(total_seconds)}** です。")
 
     @client.tree.command(name="announce", description="指定したチャンネルにBotからお知らせを投稿します。(管理者限定)")
     @app_commands.checks.has_permissions(administrator=True)
