@@ -14,7 +14,7 @@ import google.generativeai as genai
 # --- ロギング設定 ---
 logging.basicConfig(level=logging.INFO)
 
-# --- 環境変数からIDを取得 (グローバルスコープ) ---
+# --- 環境変数とグローバル定数の定義 ---
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -37,9 +37,6 @@ ADMIN_USER_ID = int(os.getenv('ADMIN_USER_ID', 0))
 RECRUIT_CHANNEL_ID = int(os.getenv('RECRUIT_CHANNEL_ID', 0))
 ADMIN_ROLE_ID = int(os.getenv('ADMIN_ROLE_ID', 0))
 
-# --- グローバル変数と定数 ---
-active_sessions = {}
-LAST_REMINDED_BUMP_ID_FILE = 'data/last_reminded_id.txt'
 gemini_model = None
 if GEMINI_API_KEY:
     try:
@@ -49,7 +46,10 @@ if GEMINI_API_KEY:
     except Exception as e:
         logging.error(f"Failed to configure Gemini model: {e}")
 
-# --- ヘルパー関数 ---
+LAST_REMINDED_BUMP_ID_FILE = 'data/last_reminded_id.txt'
+active_sessions = {}
+
+# --- ヘルパー関数：時間フォーマット ---
 def format_duration(total_seconds):
     if total_seconds is None or total_seconds < 0: total_seconds = 0
     hours, remainder = divmod(total_seconds, 3600)
@@ -115,6 +115,7 @@ class MyClient(discord.Client):
         if self.db_pool: await self.db_pool.close()
         await super().close()
 
+    # --- バックグラウンド処理 ---
     async def _do_periodic_role_check(self):
         pass
 
@@ -123,19 +124,25 @@ class MyClient(discord.Client):
             bump_channel = self.get_channel(BUMP_CHANNEL_ID)
             if not bump_channel: return
             disboard_bot_id = 302050872383242240
+            last_disboard_message = None
             async for message in bump_channel.history(limit=100):
                 if message.author.id == disboard_bot_id:
                     last_disboard_message = message
-                    last_reminded_id = 0
-                    if os.path.exists(LAST_REMINDED_BUMP_ID_FILE):
-                        with open(LAST_REMINDED_BUMP_ID_FILE, 'r') as f:
-                            content = f.read().strip()
-                            if content.isdigit(): last_reminded_id = int(content)
-                    if last_disboard_message.id == last_reminded_id: return
-                    if datetime.now(timezone.utc) >= last_disboard_message.created_at + timedelta(hours=2):
-                        await bump_channel.send("みんな、DISBOARDの **/bump** の時間だよ！\nサーバーの表示順を上げて、新しい仲間を増やそう！")
-                        with open(LAST_REMINDED_BUMP_ID_FILE, 'w') as f: f.write(str(last_disboard_message.id))
                     break
+            
+            if not last_disboard_message: return
+
+            last_reminded_id = 0
+            if os.path.exists(LAST_REMINDED_BUMP_ID_FILE):
+                with open(LAST_REMINDED_BUMP_ID_FILE, 'r') as f:
+                    content = f.read().strip()
+                    if content.isdigit(): last_reminded_id = int(content)
+            
+            if last_disboard_message.id == last_reminded_id: return
+
+            if datetime.now(timezone.utc) >= last_disboard_message.created_at + timedelta(hours=2):
+                await bump_channel.send("みんな、DISBOARDの **/bump** の時間だよ！\nサーバーの表示順を上げて、新しい仲間を増やそう！")
+                with open(LAST_REMINDED_BUMP_ID_FILE, 'w') as f: f.write(str(last_disboard_message.id))
         except Exception as e:
             logging.error(f"Error in _do_bump_reminder_check: {e}", exc_info=True)
 
@@ -152,17 +159,20 @@ class MyClient(discord.Client):
 
 client = MyClient(intents=intents)
 
+# --- イベント：Bot起動時 ---
 @client.event
 async def on_ready():
     logging.info(f'Logged in as {client.user}')
     if not os.path.exists('data'): os.makedirs('data')
 
+# --- イベント：メッセージ受信時 ---
 @client.event
 async def on_message(message):
     if message.author == client.user: return
     disboard_bot_id = 302050872383242240
     if message.author.bot and message.author.id != disboard_bot_id: return
     
+    # AI応答機能
     if client.user.mentioned_in(message) and gemini_model:
         if message.reference and message.reference.cached_message and message.reference.cached_message.author == client.user: return
         async with message.channel.typing():
@@ -176,9 +186,11 @@ async def on_message(message):
                 await message.reply("ごめん、AIモデルとの通信でエラーが起きちゃった。")
         return
 
+    # Bump成功メッセージの検知
     if message.channel.id == BUMP_CHANNEL_ID and message.author.id == disboard_bot_id:
         if "表示順をアップしたよ" in message.content: logging.info(f"Bump success message detected.")
 
+# --- イベント：リアクション追加時 ---
 @client.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     if payload.channel_id != INTRO_CHANNEL_ID or str(payload.emoji) != '👌' or not payload.member or payload.member.bot: return
@@ -199,6 +211,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     except Exception as e:
         logging.error(f"Error in on_raw_reaction_add: {e}", exc_info=True)
 
+# --- イベント：ボイスチャンネル状態更新時 ---
 @client.event
 async def on_voice_state_update(member, before, after):
     if member.bot: return
@@ -221,6 +234,7 @@ async def on_voice_state_update(member, before, after):
             if log_channel:
                 await log_channel.send(f"{member.mention}\nお疲れ様、{member.display_name}！\n今回の作業時間は **{format_duration(duration)}** だったよ。\n累計作業時間は **{format_duration(total_seconds_after_update)}** だよ。")
 
+# --- スラッシュコマンド：/worktime ---
 @client.tree.command(name="worktime", description="指定したメンバーの累計作業時間を表示します。")
 async def worktime(interaction: discord.Interaction, member: discord.Member):
     if not client.db_pool: return await interaction.response.send_message("DB未接続です。", ephemeral=True)
@@ -234,6 +248,7 @@ async def worktime(interaction: discord.Interaction, member: discord.Member):
         total_seconds += (datetime.now(timezone.utc) - join_time).total_seconds()
     await interaction.followup.send(f"{member.display_name} さんの累計作業時間は **{format_duration(total_seconds)}** です。")
 
+# --- スラッシュコマンド：/worktime_ranking ---
 @client.tree.command(name="worktime_ranking", description="累計作業時間のトップ10ランキングを表示します。")
 async def worktime_ranking(interaction: discord.Interaction):
     if not client.db_pool: return await interaction.response.send_message("DB未接続です。", ephemeral=True)
@@ -256,12 +271,14 @@ async def worktime_ranking(interaction: discord.Interaction):
     except Exception as e:
         logging.error(f"Error in worktime_ranking: {e}", exc_info=True)
 
+# --- スラッシュコマンド：/announce ---
 @client.tree.command(name="announce", description="指定したチャンネルにBotからお知らせを投稿します。(管理者限定)")
 @app_commands.checks.has_permissions(administrator=True)
 async def announce(interaction: discord.Interaction, channel: discord.TextChannel):
     await channel.send("★お知らせ用メッセージ入力欄★")
     await interaction.response.send_message(f"{channel.mention} にお知らせを投稿しました。", ephemeral=True)
 
+# --- スラッシュコマンド：/setup_recruit ---
 @client.tree.command(name="setup_recruit", description="作業募集用のパネルを設置します。(管理者限定)")
 @app_commands.checks.has_permissions(administrator=True)
 async def setup_recruit(interaction: discord.Interaction):
@@ -269,8 +286,14 @@ async def setup_recruit(interaction: discord.Interaction):
     await interaction.channel.send(embed=embed, view=RecruitmentView())
     await interaction.response.send_message("募集パネルを設置しました。", ephemeral=True)
 
-# --- main関数を呼び出す実行ブロック ---
+# --- メインの実行ブロック ---
 def run_main():
+    if TOKEN:
+        client.run(TOKEN, reconnect=True)
+    else:
+        logging.error("TOKEN not found.")
+
+if __name__ == "__main__":
     while True:
         try:
             main()
@@ -284,6 +307,3 @@ def run_main():
         except Exception as e:
             logging.error(f"Main loop error: {e}", exc_info=True)
             time.sleep(60)
-
-if __name__ == "__main__":
-    run_main()
