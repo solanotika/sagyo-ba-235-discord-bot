@@ -94,7 +94,7 @@ def main():
                 if DATABASE_URL:
                     self.db_pool = await asyncpg.create_pool(dsn=DATABASE_URL, min_size=1, max_size=10)
                     async with self.db_pool.acquire() as connection:
-                        await connection.execute('CREATE TABLE IF NOT EXISTS work_sessions (session_id SERIAL PRIMARY KEY, user_id BIGINT NOT NULL, start_time TIMESTAMPTZ NOT NULL, end_time TIMESTAMPTZ NOT NULL)')
+                        await connection.execute('CREATE TABLE IF NOT EXISTS work_logs (user_id BIGINT PRIMARY KEY, total_seconds DOUBLE PRECISION NOT NULL DEFAULT 0.0)')
             except Exception as e:
                 logging.error(f"DB Error: {e}")
             
@@ -207,10 +207,14 @@ def main():
     async def on_voice_state_update(member, before, after):
         if member.bot: return
         now = datetime.now(timezone.utc)
+        
+        # --- ここからが修正点 ---
         is_before_work_vc = before.channel and before.channel.id not in EXCLUDE_VC_IDS
         is_after_work_vc = after.channel and after.channel.id not in EXCLUDE_VC_IDS
+
         if not is_before_work_vc and is_after_work_vc:
             active_sessions[member.id] = now
+            logging.info(f"SESSION START: {member.display_name} in {after.channel.name}")
         elif is_before_work_vc and not is_after_work_vc:
             if member.id in active_sessions:
                 join_time = active_sessions.pop(member.id)
@@ -218,12 +222,14 @@ def main():
                 total_seconds_after_update = 0
                 if client.db_pool:
                     async with client.db_pool.acquire() as connection:
-                        await connection.execute('INSERT INTO work_sessions (user_id, start_time, end_time) VALUES ($1, $2, $3)', member.id, join_time, now)
-                        record = await connection.fetchrow("SELECT SUM(EXTRACT(EPOCH FROM (end_time - start_time))) as total FROM work_sessions WHERE user_id = $1", member.id)
-                        if record and record['total']: total_seconds_after_update = record['total']
+                        await connection.execute('INSERT INTO work_logs (user_id, total_seconds) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET total_seconds = work_logs.total_seconds + $2', member.id, duration)
+                        record = await connection.fetchrow("SELECT total_seconds FROM work_logs WHERE user_id = $1", member.id)
+                        if record: total_seconds_after_update = record['total_seconds']
                 log_channel = client.get_channel(WORK_LOG_CHANNEL_ID)
                 if log_channel:
                     await log_channel.send(f"{member.mention}\nお疲れ様、{member.display_name}！\n今回の作業時間は **{format_duration(duration)}** だったよ。\n累計作業時間は **{format_duration(total_seconds_after_update)}** だよ。")
+                logging.info(f"SESSION END: {member.display_name}. Duration: {format_duration(duration)}")
+        # --- ここまでが修正点 ---
 
     @client.tree.command(name="worktime", description="指定したメンバーの累計作業時間を表示します。")
     async def worktime(interaction: discord.Interaction, member: discord.Member):
@@ -231,52 +237,31 @@ def main():
         await interaction.response.defer()
         total_seconds = 0
         async with client.db_pool.acquire() as connection:
-            record = await connection.fetchrow("SELECT SUM(EXTRACT(EPOCH FROM (end_time - start_time))) as total FROM work_sessions WHERE user_id = $1", member.id)
+            record = await connection.fetchrow("SELECT total_seconds FROM work_logs WHERE user_id = $1", member.id)
             if record and record['total']: total_seconds = record['total']
         if member.id in active_sessions:
             join_time = active_sessions[member.id]
             total_seconds += (datetime.now(timezone.utc) - join_time).total_seconds()
         await interaction.followup.send(f"{member.display_name} さんの累計作業時間は **{format_duration(total_seconds)}** です。")
 
-    @client.tree.command(name="worktime_ranking", description="作業時間ランキングを表示します。")
-    @app_commands.describe(period="集計期間を選択してください")
-    @app_commands.choices(period=[
-        app_commands.Choice(name="累計 (All-time)", value="all"),
-        app_commands.Choice(name="今月 (Monthly)", value="monthly"),
-        app_commands.Choice(name="今週 (Weekly)", value="weekly"),
-    ])
-    async def worktime_ranking(interaction: discord.Interaction, period: str):
+    @client.tree.command(name="worktime_ranking", description="累計作業時間のトップ10ランキングを表示します。")
+    async def worktime_ranking(interaction: discord.Interaction):
         if not client.db_pool: return await interaction.response.send_message("DB未接続です。", ephemeral=True)
         await interaction.response.defer()
         try:
-            now = datetime.now(timezone.utc)
-            title, query_filter = "", ""
-            if period == "all":
-                title = "🏆 累計作業時間ランキング TOP10"
-                query_filter = ""
-            elif period == "monthly":
-                title = f"🗓️ {now.year}年{now.month}月 作業時間ランキング"
-                start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-                query_filter = f"WHERE start_time >= '{start_of_month}'"
-            elif period == "weekly":
-                title = f"📅 今週の作業時間ランキング"
-                start_of_week = now - timedelta(days=now.weekday())
-                start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
-                query_filter = f"WHERE start_time >= '{start_of_week}'"
-            
             async with client.db_pool.acquire() as connection:
-                query = f"SELECT user_id, SUM(EXTRACT(EPOCH FROM (end_time - start_time))) as total FROM work_sessions {query_filter} GROUP BY user_id HAVING SUM(EXTRACT(EPOCH FROM (end_time - start_time))) > 0 ORDER BY total DESC LIMIT 10;"
-                records = await connection.fetch(query)
-            
-            if not records: return await interaction.followup.send(f"この期間の作業記録はまだありません。")
-
-            embed = discord.Embed(title=title, color=discord.Color.gold())
+                records = await connection.fetch("SELECT user_id, total_seconds FROM work_logs WHERE total_seconds > 0 ORDER BY total_seconds DESC LIMIT 10;")
+            if not records: return await interaction.followup.send("まだ誰も作業記録がありません。")
+            embed = discord.Embed(title="🏆 作業時間ランキング TOP10", color=discord.Color.gold())
             rank_emojis = ["🥇", "🥈", "🥉"]
             for i, record in enumerate(records):
-                member = interaction.guild.get_member(record['user_id'])
-                user_name = member.display_name if member else f"ID: {record['user_id']} (元メンバー)"
+                if interaction.guild:
+                    member = interaction.guild.get_member(record['user_id'])
+                    user_name = member.display_name if member else f"ID: {record['user_id']} (元メンバー)"
+                else:
+                    user_name = f"ID: {record['user_id']}"
                 rank = rank_emojis[i] if i < 3 else f"**{i+1}位**"
-                embed.add_field(name=f"{rank}：{user_name}", value=f"```{format_duration(record['total'])}```", inline=False)
+                embed.add_field(name=f"{rank}：{user_name}", value=f"```{format_duration(record['total_seconds'])}```", inline=False)
             await interaction.followup.send(embed=embed)
         except Exception as e:
             logging.error(f"Error in worktime_ranking: {e}", exc_info=True)
@@ -299,7 +284,6 @@ def main():
     else:
         logging.error("TOKEN not found.")
 
-# --- メイン実行ブロック ---
 if __name__ == "__main__":
     while True:
         try:
