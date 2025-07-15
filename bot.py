@@ -9,13 +9,14 @@ import re
 import asyncio
 import time
 import asyncpg
+import google.generativeai as genai
 
 # --- ロギング設定 ---
 logging.basicConfig(level=logging.INFO)
 
-# --- main関数を定義 ---
+# --- main関数 ---
 def main():
-    # --- 環境変数からIDを取得 ---
+    # --- 環境変数と定数の定義 ---
     try:
         from dotenv import load_dotenv
         load_dotenv()
@@ -24,6 +25,7 @@ def main():
 
     TOKEN = os.getenv('DISCORD_BOT_TOKEN')
     DATABASE_URL = os.getenv('DATABASE_URL')
+    GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
     GUILD_ID = os.getenv('GUILD_ID')
     TARGET_VC_IDS_STR = os.getenv('TARGET_VC_IDS', '')
     TARGET_VC_IDS = {int(id_str.strip()) for id_str in TARGET_VC_IDS_STR.split(',') if id_str.strip().isdigit()}
@@ -37,13 +39,13 @@ def main():
     RECRUIT_CHANNEL_ID = int(os.getenv('RECRUIT_CHANNEL_ID', 0))
     ADMIN_ROLE_ID = int(os.getenv('ADMIN_ROLE_ID', 0))
 
-    # --- 状態を保存するファイル名 ---
-    LAST_REMINDED_BUMP_ID_FILE = 'data/last_reminded_id.txt'
+    if GEMINI_API_KEY:
+        genai.configure(api_key=GEMINI_API_KEY)
 
-    # --- グローバル変数 ---
+    LAST_REMINDED_BUMP_ID_FILE = 'data/last_reminded_id.txt'
     active_sessions = {}
 
-    # --- ヘルパー関数 ---
+    # --- ヘルパー関数：時間フォーマット ---
     def format_duration(total_seconds):
         if total_seconds is None or total_seconds < 0:
             total_seconds = 0
@@ -140,7 +142,6 @@ def main():
     
     # --- バックグラウンド処理 ---
     async def do_periodic_role_check():
-        # この機能は以前の修正で削除されたため、処理は空のままです。
         pass
 
     async def do_bump_reminder_check():
@@ -190,7 +191,7 @@ def main():
         await client.wait_until_ready()
         logging.info("Client is ready, unified background loop will start.")
 
-    # --- イベントハンドラとコマンド ---
+    # --- 機能：Bot起動時の処理 ---
     @client.event
     async def on_ready():
         logging.info(f'Logged in as {client.user} (ID: {client.user.id})')
@@ -198,15 +199,42 @@ def main():
         if not os.path.exists('data'):
             os.makedirs('data')
 
+    # --- 機能：メッセージ受信時の処理 ---
     @client.event
     async def on_message(message):
+        # 自分や他のBotのメッセージは無視
         if message.author == client.user: return
         if message.author.bot and message.author.id != 302050872383242240: return
         
+        # AI応答機能
+        if client.user.mentioned_in(message) and GEMINI_API_KEY:
+            if message.reference and message.reference.cached_message and message.reference.cached_message.author == client.user:
+                return
+
+            async with message.channel.typing():
+                prompt = message.content.replace(f'<@!{client.user.id}>', '').replace(f'<@{client.user.id}>', '').strip()
+                if not prompt: return
+
+                try:
+                    model = genai.GenerativeModel('gemini-1.5-flash')
+                    response = await model.generate_content_async(prompt)
+                    
+                    if len(response.text) > 2000:
+                        for i in range(0, len(response.text), 2000):
+                            await message.reply(response.text[i:i+2000])
+                    else:
+                        await message.reply(response.text)
+                except Exception as e:
+                    logging.error(f"Gemini API Error: {e}")
+                    await message.reply("ごめん、AIモデルとの通信でエラーが起きちゃった。")
+            return
+
+        # Bump成功メッセージの検知
         if message.channel.id == BUMP_CHANNEL_ID and message.author.id == 302050872383242240:
             if "表示順をアップしたよ" in message.content:
                 logging.info(f"Bump success message detected.")
 
+    # --- 機能：リアクション追加によるロール付与 ---
     @client.event
     async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         if payload.channel_id != INTRO_CHANNEL_ID: return
@@ -238,11 +266,13 @@ def main():
         except Exception as e:
             logging.error(f"Error in on_raw_reaction_add: {e}", exc_info=True)
 
+    # --- 機能：VC状態更新時の処理 (作業時間記録 / 自動募集) ---
     @client.event
     async def on_voice_state_update(member, before, after):
         if member.bot: return
         now = datetime.now(timezone.utc)
         
+        # 作業時間記録
         if after.channel and after.channel.id in TARGET_VC_IDS and (not before.channel or before.channel.id not in TARGET_VC_IDS):
             active_sessions[member.id] = now
         elif before.channel and before.channel.id in TARGET_VC_IDS and (not after.channel or after.channel.id not in TARGET_VC_IDS):
@@ -271,30 +301,9 @@ def main():
                         f"累計作業時間は **{format_duration(total_seconds_after_update)}** だよ。"
                     )
 
-    @client.tree.command(name="worktime_ranking", description="累計作業時間のトップ10ランキングを表示します。")
-    async def worktime_ranking(interaction: discord.Interaction):
-        if not client.db_pool: return await interaction.response.send_message("DB未接続です。", ephemeral=True)
-        await interaction.response.defer()
-        try:
-            async with client.db_pool.acquire() as connection:
-                query = "SELECT user_id, total_seconds FROM work_logs WHERE total_seconds > 0 ORDER BY total_seconds DESC LIMIT 10;"
-                records = await connection.fetch(query)
-            if not records: return await interaction.followup.send("まだ誰も作業記録がありません。")
-
-            embed = discord.Embed(title="🏆 作業時間ランキング TOP10", color=discord.Color.gold())
-            rank_emojis = ["🥇", "🥈", "🥉"]
-            
-            for i, record in enumerate(records):
-                member = interaction.guild.get_member(record['user_id'])
-                user_name = member.display_name if member else f"ID: {record['user_id']} (元メンバー)"
-                rank = rank_emojis[i] if i < 3 else f"**{i+1}位**"
-                embed.add_field(name=f"{rank}：{user_name}", value=f"```{format_duration(record['total_seconds'])}```", inline=False)
-            
-            await interaction.followup.send(embed=embed)
-        except Exception as e:
-            logging.error(f"Error in worktime_ranking: {e}", exc_info=True)
-            await interaction.followup.send("ランキングの取得中にエラーが発生しました。")
-
+    # --- スラッシュコマンド群 ---
+    
+    # コマンド：/worktime
     @client.tree.command(name="worktime", description="指定したメンバーの累計作業時間を表示します。")
     async def worktime(interaction: discord.Interaction, member: discord.Member):
         if not client.db_pool: return await interaction.response.send_message("DB未接続です。", ephemeral=True)
@@ -310,12 +319,48 @@ def main():
             total_seconds += (datetime.now(timezone.utc) - join_time).total_seconds()
         await interaction.followup.send(f"{member.display_name} さんの累計作業時間は **{format_duration(total_seconds)}** です。")
 
+    # コマンド：/worktime_ranking
+    @client.tree.command(name="worktime_ranking", description="累計作業時間のトップ10ランキングを表示します。")
+    async def worktime_ranking(interaction: discord.Interaction):
+        if not client.db_pool: return await interaction.response.send_message("DB未接続です。", ephemeral=True)
+        await interaction.response.defer()
+        try:
+            async with client.db_pool.acquire() as connection:
+                query = "SELECT user_id, total_seconds FROM work_logs WHERE total_seconds > 0 ORDER BY total_seconds DESC LIMIT 10;"
+                records = await connection.fetch(query)
+            if not records: return await interaction.followup.send("まだ誰も作業記録がありません。")
+
+            embed = discord.Embed(title="🏆 作業時間ランキング TOP10", color=discord.Color.gold())
+            rank_emojis = ["🥇", "🥈", "🥉"]
+            
+            for i, record in enumerate(records):
+                if interaction.guild:
+                    member = interaction.guild.get_member(record['user_id'])
+                    user_name = member.display_name if member else f"ID: {record['user_id']} (元メンバー)"
+                else:
+                    user_name = f"ID: {record['user_id']}"
+                rank = rank_emojis[i] if i < 3 else f"**{i+1}位**"
+                embed.add_field(name=f"{rank}：{user_name}", value=f"```{format_duration(record['total_seconds'])}```", inline=False)
+            
+            await interaction.followup.send(embed=embed)
+        except Exception as e:
+            logging.error(f"Error in worktime_ranking: {e}", exc_info=True)
+            await interaction.followup.send("ランキングの取得中にエラーが発生しました。")
+
+    # コマンド：/announce
     @client.tree.command(name="announce", description="指定したチャンネルにBotからお知らせを投稿します。(管理者限定)")
+    @app_commands.describe(channel="投稿先のチャンネル")
     @app_commands.checks.has_permissions(administrator=True)
     async def announce(interaction: discord.Interaction, channel: discord.TextChannel):
         await channel.send("★お知らせ用メッセージ入力欄★")
         await interaction.response.send_message(f"{channel.mention} にお知らせを投稿しました。", ephemeral=True)
 
+    @announce.error
+    async def announce_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.errors.MissingPermissions):
+            await interaction.response.send_message("このコマンドは管理者しか使えないよ。", ephemeral=True)
+
+    # コマンド：/setup_recruit
     @client.tree.command(name="setup_recruit", description="作業募集用のパネルを設置します。(管理者限定)")
     @app_commands.checks.has_permissions(administrator=True)
     async def setup_recruit(interaction: discord.Interaction):
@@ -323,11 +368,18 @@ def main():
         await interaction.channel.send(embed=embed, view=RecruitmentView())
         await interaction.response.send_message("募集パネルを設置しました。", ephemeral=True)
 
+    @setup_recruit.error
+    async def setup_recruit_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.errors.MissingPermissions):
+            await interaction.response.send_message("このコマンドは管理者しか使えないよ。", ephemeral=True)
+
+    # Botの実行
     if TOKEN:
         client.run(TOKEN, reconnect=True)
     else:
         logging.error("TOKEN not found.")
 
+# --- メイン実行ブロック ---
 if __name__ == "__main__":
     while True:
         try:
