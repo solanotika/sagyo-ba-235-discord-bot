@@ -200,16 +200,30 @@ def main():
 
     # --- 機能：メッセージ受信時の処理 ---
     @client.event
+    @client.event
     async def on_message(message):
+        # 自分自身や他のBotのメッセージは基本的に無視 (DISBOARDは例外)
         if message.author == client.user: return
         if message.author.bot and message.author.id != 302050872383242240: return
         
-        if client.user.mentioned_in(message) and GEMINI_API_KEY:
-            logging.info("-> AI Handler: Mention detected.")
+        # --- AI応答機能 (診断モード) ---
+        # メンションが含まれているかどうかのチェック
+        is_mentioned = client.user.mentioned_in(message)
+        logging.info(f"-> AI Handler: Message received. Is mentioned? {is_mentioned}")
+
+        # APIキーが存在するかのチェック
+        has_api_key = bool(GEMINI_API_KEY)
+        logging.info(f"-> AI Handler: Gemini API Key found? {has_api_key}")
+
+        if is_mentioned and has_api_key:
+            logging.info("-> AI Handler: Conditions met, proceeding with AI response.")
+
+            # ループ防止
             if message.reference and message.reference.cached_message and message.reference.cached_message.author == client.user:
                 logging.info("-> AI Handler: Ignored mention because it's a reply to myself.")
                 return
 
+            # プロンプトをクリーニング
             prompt = re.sub(r'<@!?(\d+)>', '', message.content).strip()
             logging.info(f"-> AI Handler: Cleaned prompt is: '{prompt}'")
             
@@ -223,6 +237,7 @@ def main():
                     model = genai.GenerativeModel('gemini-1.5-flash')
                     response = await model.generate_content_async(prompt)
                     
+                    # 回答を送信
                     if len(response.text) > 2000:
                         for i in range(0, len(response.text), 2000):
                             await message.reply(response.text[i:i+2000])
@@ -235,6 +250,7 @@ def main():
                     await message.reply("ごめん、AIモデルとの通信でエラーが起きちゃった。")
             return
 
+        # --- Bump成功メッセージの検知 ---
         if message.channel.id == BUMP_CHANNEL_ID and message.author.id == 302050872383242240:
             if "表示順をアップしたよ" in message.content:
                 logging.info(f"Bump success message detected.")
