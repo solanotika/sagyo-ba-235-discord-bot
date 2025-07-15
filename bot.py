@@ -201,33 +201,46 @@ def main():
 
     # --- 機能：メッセージ受信時の処理 ---
     @client.event
-    async def on_message(message):
-        # 自分や他のBotのメッセージは無視
-        if message.author == client.user: return
-        if message.author.bot and message.author.id != 302050872383242240: return
-        
-        # AI応答機能
-        if client.user.mentioned_in(message) and GEMINI_API_KEY:
-            if message.reference and message.reference.cached_message and message.reference.cached_message.author == client.user:
-                return
+async def on_message(message):
+    # 自分自身や他のBotのメッセージは基本的に無視 (DISBOARDは例外)
+    if message.author == client.user: return
+    if message.author.bot and message.author.id != 302050872383242240: return
+    
+    # --- AI応答機能 (診断モード) ---
+    if client.user.mentioned_in(message) and GEMINI_API_KEY:
+        logging.info("-> AI Handler: Mention detected.")
 
-            async with message.channel.typing():
-                prompt = message.content.replace(f'<@!{client.user.id}>', '').replace(f'<@{client.user.id}>', '').strip()
-                if not prompt: return
-
-                try:
-                    model = genai.GenerativeModel('gemini-1.5-flash')
-                    response = await model.generate_content_async(prompt)
-                    
-                    if len(response.text) > 2000:
-                        for i in range(0, len(response.text), 2000):
-                            await message.reply(response.text[i:i+2000])
-                    else:
-                        await message.reply(response.text)
-                except Exception as e:
-                    logging.error(f"Gemini API Error: {e}")
-                    await message.reply("ごめん、AIモデルとの通信でエラーが起きちゃった。")
+        # ループ防止
+        if message.reference and message.reference.cached_message and message.reference.cached_message.author == client.user:
+            logging.info("-> AI Handler: Ignored mention because it's a reply to myself.")
             return
+
+        # プロンプトをクリーニング
+        prompt = re.sub(r'<@!?(\d+)>', '', message.content).strip()
+        logging.info(f"-> AI Handler: Cleaned prompt is: '{prompt}'")
+        
+        if not prompt:
+            logging.info("-> AI Handler: Prompt is empty after cleaning. Exiting.")
+            return
+
+        async with message.channel.typing():
+            try:
+                logging.info("-> AI Handler: Generating content with Gemini API...")
+                model = genai.GenerativeModel('gemini-1.5-flash')
+                response = await model.generate_content_async(prompt)
+                
+                # 回答を送信
+                if len(response.text) > 2000:
+                    for i in range(0, len(response.text), 2000):
+                        await message.reply(response.text[i:i+2000])
+                else:
+                    await message.reply(response.text)
+                logging.info("-> AI Handler: Successfully sent reply.")
+
+            except Exception as e:
+                logging.error(f"-> AI Handler: Gemini API Error: {e}")
+                await message.reply("ごめん、AIモデルとの通信でエラーが起きちゃった。")
+        return
 
         # Bump成功メッセージの検知
         if message.channel.id == BUMP_CHANNEL_ID and message.author.id == 302050872383242240:
