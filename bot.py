@@ -94,16 +94,7 @@ def main():
                 if DATABASE_URL:
                     self.db_pool = await asyncpg.create_pool(dsn=DATABASE_URL, min_size=1, max_size=10)
                     async with self.db_pool.acquire() as connection:
-                        await connection.execute('''
-                            CREATE TABLE IF NOT EXISTS work_sessions (
-                                session_id SERIAL PRIMARY KEY,
-                                user_id BIGINT NOT NULL,
-                                start_time TIMESTAMPTZ NOT NULL,
-                                end_time TIMESTAMPTZ NOT NULL
-                            )
-                        ''')
-                else:
-                    logging.warning("DATABASE_URL not found.")
+                        await connection.execute('CREATE TABLE IF NOT EXISTS work_sessions (session_id SERIAL PRIMARY KEY, user_id BIGINT NOT NULL, start_time TIMESTAMPTZ NOT NULL, end_time TIMESTAMPTZ NOT NULL)')
             except Exception as e:
                 logging.error(f"DB Error: {e}")
             
@@ -232,10 +223,30 @@ def main():
                             'INSERT INTO work_sessions (user_id, start_time, end_time) VALUES ($1, $2, $3)',
                             member.id, join_time, now
                         )
-                
+                        
+                        # --- ここからが修正点 ---
+                        start_of_week = now - timedelta(days=now.weekday())
+                        start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
+                        start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+                        weekly_record = await connection.fetchrow("SELECT SUM(EXTRACT(EPOCH FROM (end_time - start_time))) as total FROM work_sessions WHERE user_id = $1 AND start_time >= $2", member.id, start_of_week)
+                        monthly_record = await connection.fetchrow("SELECT SUM(EXTRACT(EPOCH FROM (end_time - start_time))) as total FROM work_sessions WHERE user_id = $1 AND start_time >= $2", member.id, start_of_month)
+                        
+                        weekly_total = weekly_record['total'] or 0
+                        monthly_total = monthly_record['total'] or 0
+                        # --- ここまでが修正点 ---
+
                 log_channel = client.get_channel(WORK_LOG_CHANNEL_ID)
                 if log_channel:
-                    await log_channel.send(f"お疲れ様、{member.display_name}！今回の作業時間は **{format_duration(duration)}** だったよ。")
+                    # --- ここからが修正点 ---
+                    message_to_send = (
+                        f"{member.mention}\n"
+                        f"お疲れ様、{member.display_name}！\n"
+                        f"今回の作業時間は **{format_duration(duration)}** だったよ。\n"
+                        f"今週の累計: **{format_duration(weekly_total)}** | 今月の累計: **{format_duration(monthly_total)}**"
+                    )
+                    await log_channel.send(message_to_send)
+                    # --- ここまでが修正点 ---
 
     @client.tree.command(name="worktime", description="指定したメンバーの作業時間を表示します。")
     async def worktime(interaction: discord.Interaction, member: discord.Member):
@@ -303,14 +314,7 @@ def main():
                 query_filter = f"WHERE start_time >= DATE_TRUNC('week', NOW())"
             
             async with client.db_pool.acquire() as connection:
-                query = f"""
-                    SELECT user_id, SUM(EXTRACT(EPOCH FROM (end_time - start_time))) as total 
-                    FROM work_sessions {query_filter} 
-                    GROUP BY user_id 
-                    HAVING SUM(EXTRACT(EPOCH FROM (end_time - start_time))) > 0 
-                    ORDER BY total DESC 
-                    LIMIT 10;
-                """
+                query = f"SELECT user_id, SUM(EXTRACT(EPOCH FROM (end_time - start_time))) as total FROM work_sessions {query_filter} GROUP BY user_id HAVING SUM(EXTRACT(EPOCH FROM (end_time - start_time))) > 0 ORDER BY total DESC LIMIT 10;"
                 records = await connection.fetch(query)
             
             if not records: return await interaction.followup.send(f"この期間の作業記録はまだありません。")
